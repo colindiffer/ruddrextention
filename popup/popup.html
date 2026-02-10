@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ruddr Time Tracker</title>
+  <link rel="stylesheet" href="../styles/shared.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Setup prompt (shown when no API key) -->
+  <div id="setupView" class="view hidden">
+    <div class="setup-prompt">
+      <div class="setup-icon">⚙️</div>
+      <h2>Welcome to Ruddr</h2>
+      <p>Sign in with your email to get started.</p>
+      <button id="openOptionsBtn" class="btn-primary">Sign In</button>
+    </div>
+  </div>
+
+  <!-- Weekly view -->
+  <div id="weeklyView" class="view hidden">
+    <header class="popup-header">
+      <span class="header-title">Ruddr</span>
+      <button id="settingsBtn" class="btn-icon" title="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+        </svg>
+      </button>
+    </header>
+
+    <div id="timerBar" class="timer-bar hidden">
+      <div class="timer-info">
+        <span class="timer-time" id="timerDisplay">0:00:00</span>
+        <span class="timer-project" id="timerProject">Project Name</span>
+      </div>
+      <div class="timer-controls">
+        <button id="timerStopBtn" class="btn-icon" title="Pause timer">&#9646;&#9646;</button>
+        <button id="timerResumeBtn" class="btn-icon hidden" title="Resume timer">&#9654;</button>
+        <button id="timerDismissBtn" class="btn-icon hidden" title="Dismiss">&#10005;</button>
+      </div>
+    </div>
+
+    <div class="day-nav">
+      <button id="prevDay" class="btn-icon nav-arrow">‹</button>
+      <button id="currentDayLabel" class="btn-icon day-label-btn">Today</button>
+      <button id="nextDay" class="btn-icon nav-arrow">›</button>
+    </div>
+
+    <div id="dayContainer" class="day-container">
+      <div class="loading-state">
+        <div class="spinner"></div>
+        <span>Loading entries...</span>
+      </div>
+    </div>
+
+    <div class="day-footer">
+      <span class="daily-total">Total: <strong id="dailyTotal">0h</strong></span>
+      <button id="addEntryBtn" class="btn-primary add-btn">+ New Entry</button>
+    </div>
+  </div>
+
+  <!-- Entry form (add/edit) -->
+  <div id="entryView" class="view hidden">
+    <header class="popup-header">
+      <button id="backBtn" class="btn-icon">‹ Back</button>
+      <span id="entryTitle" class="header-title">New Entry</span>
+      <span></span>
+    </header>
+
+    <form id="entryForm" class="entry-form">
+      <div class="field">
+        <label for="projectSelect">Project</label>
+        <select id="projectSelect">
+          <option value="">Select project...</option>
+        </select>
+      </div>
+
+      <div class="field-row">
+        <div class="field flex-1">
+          <label for="taskSelect">Task</label>
+          <select id="taskSelect" disabled>
+            <option value="">Select task...</option>
+          </select>
+        </div>
+        <div class="field flex-1">
+          <label for="roleSelect">Role</label>
+          <select id="roleSelect" disabled>
+            <option value="">Select role...</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="dateHoursRow" class="field-row">
+        <div class="field flex-1">
+          <label for="entryDate">Date</label>
+          <input type="date" id="entryDate">
+        </div>
+        <div class="field flex-1">
+          <label for="entryHours">Hours</label>
+          <input type="number" id="entryHours" step="0.25" min="0" max="24" placeholder="1.5">
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="entryNotes">Notes</label>
+        <textarea id="entryNotes" placeholder="What did you work on?"></textarea>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" id="deleteEntryBtn" class="btn-danger hidden">Delete</button>
+        <div class="form-actions-right">
+          <button type="button" id="cancelBtn" class="btn-secondary">Cancel</button>
+          <button type="button" id="startTimerSubmitBtn" class="btn-accent-outline">&#9654; Timer</button>
+          <button type="submit" id="saveEntryBtn" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  <!-- Delete confirmation modal -->
+  <div id="deleteModal" class="modal-overlay hidden">
+    <div class="modal">
+      <p>Delete this time entry?</p>
+      <div class="modal-actions">
+        <button id="deleteCancelBtn" class="btn-secondary">Cancel</button>
+        <button id="deleteConfirmBtn" class="btn-danger">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,368 @@
+body {
+  width: 400px;
+  min-height: 200px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.view {
+  display: flex;
+  flex-direction: column;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Setup prompt */
+.setup-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.setup-icon {
+  font-size: 32px;
+  margin-bottom: 12px;
+}
+
+.setup-prompt h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.setup-prompt p {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+/* Timer bar */
+.timer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #e6f7f6;
+  border-bottom: 2px solid #0bb5ac;
+}
+
+.timer-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.timer-time {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #065f5b;
+}
+
+.timer-project {
+  font-size: 12px;
+  color: #065f5b;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
+}
+
+.timer-controls {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.timer-controls .btn-icon {
+  font-size: 18px;
+  color: #065f5b;
+  padding: 4px 8px;
+}
+
+.timer-controls .btn-icon:hover {
+  background: rgba(11, 181, 172, 0.1);
+  color: #065f5b;
+}
+
+.timer-bar.paused {
+  background: var(--color-bg-secondary);
+  border-bottom: 2px solid var(--color-border);
+}
+
+.timer-bar.paused .timer-time {
+  color: var(--color-text-secondary);
+}
+
+.timer-bar.paused .timer-project {
+  color: var(--color-text-secondary);
+}
+
+/* Header */
+.popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.header-title {
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--color-accent);
+}
+
+/* Day navigation */
+.day-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-bg-secondary);
+}
+
+.nav-arrow {
+  font-size: 20px;
+  font-weight: 700;
+  padding: 2px 10px;
+}
+
+.day-label-btn {
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 120px;
+  text-align: center;
+}
+
+/* Day container */
+.day-container {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 360px;
+}
+
+.loading-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 40px 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+/* Day entries list */
+.day-entries {
+  padding: 0;
+}
+
+.entry-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px 8px 20px;
+  cursor: pointer;
+  transition: background 0.1s;
+  gap: 8px;
+}
+
+.entry-item:hover {
+  background: var(--color-accent-light);
+}
+
+.entry-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.entry-project {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.entry-detail {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.entry-hours {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-accent);
+  flex-shrink: 0;
+}
+
+.entry-play-btn {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 2px 6px;
+  color: var(--color-accent);
+  background: none;
+  border: none;
+  border-radius: var(--radius);
+}
+
+.entry-play-btn:hover {
+  background: var(--color-accent-light);
+}
+
+/* Day footer */
+.day-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-bg);
+}
+
+.daily-total {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.daily-total strong {
+  color: var(--color-text);
+  font-size: 15px;
+}
+
+.add-btn {
+  padding: 6px 14px;
+  font-size: 13px;
+}
+
+/* Entry form */
+.entry-form {
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 420px;
+}
+
+.entry-form .field {
+  margin-bottom: 10px;
+}
+
+.field-row {
+  display: flex;
+  gap: 10px;
+}
+
+.flex-1 {
+  flex: 1;
+}
+
+.toggle-field {
+  margin-top: 4px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.toggle-label input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-switch {
+  width: 36px;
+  height: 20px;
+  background: var(--color-border);
+  border-radius: 10px;
+  position: relative;
+  transition: background 0.2s;
+}
+
+.toggle-switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+
+.toggle-label input:checked + .toggle-switch {
+  background: var(--color-accent);
+}
+
+.toggle-label input:checked + .toggle-switch::after {
+  transform: translateX(16px);
+}
+
+.form-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.form-actions-right {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal {
+  background: var(--color-bg);
+  border-radius: 8px;
+  padding: 20px;
+  width: 280px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  text-align: center;
+}
+
+.modal p {
+  font-size: 14px;
+  font-weight: 500;
+  margin-bottom: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
