@@ -1,20 +1,25 @@
-import { getMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
-import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, getTimeEntry } from '../lib/api.js';
+import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
+import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, getTimeEntry, listMembers } from '../lib/api.js';
 
 // --- State ---
 let currentDate = new Date();
 currentDate.setHours(0, 0, 0, 0);
 let entries = [];
+let weekEntries = [];
 let projects = []; // { id, name, clientName } sorted alphabetically
 let memberProjectMap = {}; // projectId -> project-member record (includes roles)
 let editingEntry = null; // null = new, object = editing
 let timerInterval = null; // setInterval handle for live timer display
+let loginPollInterval = null;
+let loginPollStartedAt = 0;
 
 // --- DOM refs ---
 const setupView = document.getElementById('setupView');
 const weeklyView = document.getElementById('weeklyView');
 const entryView = document.getElementById('entryView');
-const openOptionsBtn = document.getElementById('openOptionsBtn');
+const setupEmail = document.getElementById('setupEmail');
+const setupStatus = document.getElementById('setupStatus');
+const openLoginBtn = document.getElementById('openLoginBtn');
 const settingsBtn = document.getElementById('settingsBtn');
 const prevDayBtn = document.getElementById('prevDay');
 const nextDayBtn = document.getElementById('nextDay');
@@ -45,6 +50,9 @@ const timerProject = document.getElementById('timerProject');
 const timerStopBtn = document.getElementById('timerStopBtn');
 const timerResumeBtn = document.getElementById('timerResumeBtn');
 const timerDismissBtn = document.getElementById('timerDismissBtn');
+const weekHours = document.getElementById('weekHours');
+const weekStatusBadge = document.getElementById('weekStatusBadge');
+const submitWeekBtn = document.getElementById('submitWeekBtn');
 
 // --- Helpers ---
 function addDays(d, n) {
@@ -79,11 +87,25 @@ function isToday(d) {
   return d.getFullYear() === today.getFullYear() && d.getMonth() === today.getMonth() && d.getDate() === today.getDate();
 }
 
+function getWeekStart(d) {
+  const date = new Date(d);
+  const day = date.getDay(); // 0 = Sun
+  const diff = day === 0 ? -6 : 1 - day; // shift to Monday
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
 function showToast(message, type = 'error') {
   const toast = document.getElementById('toast');
   toast.textContent = message;
   toast.className = `toast ${type} show`;
   setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+function setStatus(el, message, type = '') {
+  el.textContent = message;
+  el.className = `status-msg ${type}`;
 }
 
 function showView(view) {
@@ -97,6 +119,23 @@ function formatElapsed(ms) {
   const m = Math.floor((totalSeconds % 3600) / 60);
   const s = totalSeconds % 60;
   return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function getCookiesForUrl(url) {
+  return new Promise((resolve) => {
+    chrome.cookies.getAll({ url }, (cookies) => resolve(cookies || []));
+  });
+}
+
+async function isRuddrLoggedIn() {
+  const [rootCookies, wwwCookies] = await Promise.all([
+    getCookiesForUrl('https://ruddr.io/'),
+    getCookiesForUrl('https://www.ruddr.io/'),
+  ]);
+  const cookies = [...rootCookies, ...wwwCookies];
+  const hasSession = cookies.some((c) => c.name === 'session');
+  const hasSessionSig = cookies.some((c) => c.name === 'session.sig');
+  return Boolean(hasSession && hasSessionSig);
 }
 
 // --- Timer Display ---
@@ -160,20 +199,167 @@ function stopTimerTick() {
 
 // --- Init ---
 async function init() {
+  const loggedIn = await isRuddrLoggedIn();
   const memberId = await getMemberId();
 
-  if (!memberId) {
-    showView(setupView);
+  if (!loggedIn || !memberId) {
+    if (loggedIn && !memberId) {
+      const linked = await attemptLinkMemberFromPendingEmail();
+      if (linked) {
+        await startAppView();
+        return;
+      }
+    }
+    showSetupView();
     return;
   }
 
+  await startAppView();
+}
+
+async function startAppView() {
+  stopLoginPolling();
   showView(weeklyView);
   await loadDay();
   await initTimerBar();
 }
 
+function showSetupView() {
+  showView(setupView);
+  startLoginPolling();
+}
+
+const LOGIN_POLL_INTERVAL_MS = 2000;
+const LOGIN_POLL_TIMEOUT_MS = 60000;
+
+function startLoginPolling() {
+  if (loginPollInterval) return;
+  loginPollStartedAt = Date.now();
+  loginPollInterval = setInterval(async () => {
+    if (Date.now() - loginPollStartedAt > LOGIN_POLL_TIMEOUT_MS) {
+      stopLoginPolling();
+      setStatus(setupStatus, 'Still not linked. You can retry or change email.', 'error');
+      return;
+    }
+    const loggedIn = await isRuddrLoggedIn();
+    if (!loggedIn) return;
+    const linked = await attemptLinkMemberFromPendingEmail();
+    if (linked) {
+      await startAppView();
+    }
+  }, LOGIN_POLL_INTERVAL_MS);
+}
+
+function stopLoginPolling() {
+  if (loginPollInterval) {
+    clearInterval(loginPollInterval);
+    loginPollInterval = null;
+    loginPollStartedAt = 0;
+  }
+}
+
+async function attemptLinkMemberFromPendingEmail() {
+  const { pendingEmail } = await chrome.storage.local.get('pendingEmail');
+  if (!pendingEmail) {
+    setStatus(setupStatus, 'Enter your email, then continue to Ruddr.', 'error');
+    return false;
+  }
+  try {
+    const members = await listMembers();
+    const match = members.find((m) =>
+      (m.email || '').toLowerCase() === String(pendingEmail).toLowerCase()
+    );
+    if (!match) {
+      setStatus(setupStatus, 'Email not found in Ruddr. Double-check your address.', 'error');
+      return false;
+    }
+
+    await chrome.storage.local.remove('pendingEmail');
+    await setMemberId(match.id);
+    await chrome.storage.local.set({ memberName: match.name, memberEmail: match.email || pendingEmail });
+    showToast(`Signed in as ${match.name}`, 'success');
+    setStatus(setupStatus, '', '');
+    return true;
+  } catch (err) {
+    console.error('Linking failed:', err);
+    setStatus(setupStatus, 'Linking failed. Please try again.', 'error');
+    return false;
+  }
+}
+
+// --- Week Status ---
+async function loadWeekStatus() {
+  try {
+    const weekStart = getWeekStart(currentDate);
+    const weekEnd = addDays(weekStart, 6);
+    const memberId = await getMemberId();
+    const response = await listTimeEntries({
+      memberId,
+      dateOnOrAfter: formatDate(weekStart),
+      dateOnOrBefore: formatDate(weekEnd),
+    });
+    weekEntries = response.results || [];
+    renderWeekStatus();
+  } catch {
+    // fail silently
+  }
+}
+
+function renderWeekStatus() {
+  const totalMinutes = weekEntries.reduce((s, e) => s + (e.minutes || 0), 0);
+  weekHours.textContent = minutesToHours(totalMinutes) + 'h';
+
+  if (weekEntries.length === 0) {
+    weekStatusBadge.textContent = 'No entries';
+    weekStatusBadge.className = 'week-badge week-badge-none';
+    submitWeekBtn.classList.add('hidden');
+    return;
+  }
+
+  const statuses = weekEntries.map((e) => e.statusId || 'not_submitted');
+  let overall;
+  if (statuses.every((s) => s === 'approved')) {
+    overall = 'approved';
+  } else if (statuses.every((s) => s === 'pending_approval' || s === 'approved')) {
+    overall = 'pending_approval';
+  } else if (statuses.some((s) => s === 'rejected')) {
+    overall = 'rejected';
+  } else if (statuses.some((s) => s === 'pending_approval')) {
+    overall = 'mixed';
+  } else {
+    overall = 'not_submitted';
+  }
+
+  const labels = {
+    not_submitted: 'Not submitted',
+    pending_approval: 'Submitted',
+    approved: 'Approved',
+    rejected: 'Rejected',
+    mixed: 'Partially submitted',
+  };
+  weekStatusBadge.textContent = labels[overall];
+  weekStatusBadge.className = `week-badge week-badge-${overall.replace(/_/g, '-')}`;
+
+  if (overall === 'approved') {
+    submitWeekBtn.classList.add('hidden');
+  } else if (overall === 'pending_approval') {
+    submitWeekBtn.textContent = 'Unsubmit';
+    submitWeekBtn.dataset.action = 'unsubmit';
+    submitWeekBtn.classList.remove('hidden');
+  } else {
+    submitWeekBtn.textContent = 'Submit Week';
+    submitWeekBtn.dataset.action = 'submit';
+    submitWeekBtn.classList.remove('hidden');
+  }
+}
+
 // --- Day View ---
 async function loadDay() {
+  const loggedIn = await isRuddrLoggedIn();
+  if (!loggedIn) {
+    showSetupView();
+    return;
+  }
   updateDayLabel();
   const dateStr = formatDate(currentDate);
 
@@ -193,6 +379,7 @@ async function loadDay() {
   } catch (err) {
     dayContainer.innerHTML = `<div class="empty-state">Failed to load entries.<br><small>${err.message}</small></div>`;
   }
+  loadWeekStatus(); // non-awaited: updates week bar independently
 }
 
 function updateDayLabel() {
@@ -247,7 +434,7 @@ function renderDay() {
     const firstEntry = g.entries[0];
     const notes = g.entries.map((e) => e.notes).filter(Boolean);
     const uniqueNotes = [...new Set(notes)];
-    const detail = [g.taskName, ...uniqueNotes].filter(Boolean).join(' · ');
+    const detail = [g.taskName, ...uniqueNotes].filter(Boolean).join(' \u00b7 ');
 
     html += `<div class="entry-item" data-id="${firstEntry.id}">
       <div class="entry-info">
@@ -430,7 +617,7 @@ async function startTimerOnEntry(entry) {
   try {
     let apiTimer = false;
     try {
-      await updateTimeEntry(entry.id, { timerStartedAt: new Date().toISOString() });
+      await updateTimeEntry(entry.id, { timerStartedAt: new Date().toISOString(), notes: entry.notes || '' });
       apiTimer = true;
     } catch {
       // API doesn't support timerStartedAt, use local
@@ -507,7 +694,7 @@ async function startTimer() {
       // Start timer on existing entry
       let apiTimer = false;
       try {
-        await updateTimeEntry(targetEntry.id, { timerStartedAt: new Date().toISOString() });
+        await updateTimeEntry(targetEntry.id, { timerStartedAt: new Date().toISOString(), notes: targetEntry.notes || notes });
         apiTimer = true;
       } catch {
         // API doesn't support timerStartedAt, use local
@@ -599,7 +786,7 @@ async function pauseTimer() {
   try {
     if (state.apiTimer && state.entryId) {
       // Pause API timer: clear timerStartedAt, API calculates minutes
-      await updateTimeEntry(state.entryId, { timerStartedAt: null });
+      await updateTimeEntry(state.entryId, { timerStartedAt: null, notes: state.notes || '' });
       // Fetch entry to get actual accumulated minutes from API
       try {
         const entry = await getTimeEntry(state.entryId);
@@ -614,7 +801,7 @@ async function pauseTimer() {
           };
           await setTimerState(pausedState);
           showTimerBar(pausedState, 'paused');
-          showToast(`Timer paused — ${minutesToHours(entry.minutes)}h so far`, 'success');
+          showToast(`Timer paused \u2014 ${minutesToHours(entry.minutes)}h so far`, 'success');
           stopTimerTick();
           timerStopBtn.disabled = false;
           chrome.runtime.sendMessage({ type: 'timerStopped' });
@@ -641,7 +828,7 @@ async function pauseTimer() {
       state.entryId = created.id;
     } else {
       // Local timer with existing entry: update minutes
-      await updateTimeEntry(state.entryId, { minutes: totalAccumulated });
+      await updateTimeEntry(state.entryId, { minutes: totalAccumulated, notes: state.notes || '' });
     }
 
     const pausedState = {
@@ -653,7 +840,7 @@ async function pauseTimer() {
     };
     await setTimerState(pausedState);
     showTimerBar(pausedState, 'paused');
-    showToast(`Timer paused — ${minutesToHours(totalAccumulated)}h so far`, 'success');
+    showToast(`Timer paused \u2014 ${minutesToHours(totalAccumulated)}h so far`, 'success');
   } catch (err) {
     showToast('Failed to pause timer: ' + err.message);
   }
@@ -675,7 +862,7 @@ async function resumeTimer() {
   try {
     if (state.apiTimer && state.entryId) {
       // Resume API timer: set timerStartedAt again
-      await updateTimeEntry(state.entryId, { timerStartedAt: new Date().toISOString() });
+      await updateTimeEntry(state.entryId, { timerStartedAt: new Date().toISOString(), notes: state.notes || '' });
     }
 
     const runningState = {
@@ -709,8 +896,15 @@ async function dismissTimer() {
 
 // --- Event Listeners ---
 
-openOptionsBtn.addEventListener('click', () => {
-  chrome.runtime.openOptionsPage();
+openLoginBtn.addEventListener('click', () => {
+  const email = setupEmail.value.trim();
+  if (!email) {
+    setStatus(setupStatus, 'Please enter your email first.', 'error');
+    return;
+  }
+  chrome.storage.local.set({ pendingEmail: email });
+  setStatus(setupStatus, 'Opening Ruddr login...', 'success');
+  chrome.tabs.create({ url: 'https://www.ruddr.io/login' });
 });
 
 settingsBtn.addEventListener('click', () => {
@@ -738,6 +932,31 @@ addEntryBtn.addEventListener('click', () => openEntryForm());
 timerStopBtn.addEventListener('click', pauseTimer);
 timerResumeBtn.addEventListener('click', resumeTimer);
 timerDismissBtn.addEventListener('click', dismissTimer);
+
+submitWeekBtn.addEventListener('click', async () => {
+  const action = submitWeekBtn.dataset.action;
+  submitWeekBtn.disabled = true;
+  try {
+    if (action === 'submit') {
+      const toSubmit = weekEntries.filter((e) => {
+        const s = e.statusId || 'not_submitted';
+        return s === 'not_submitted' || s === 'rejected';
+      });
+      await Promise.all(toSubmit.map((e) => updateTimeEntry(e.id, { statusId: 'pending_approval', notes: e.notes || '' })));
+      showToast('Timesheet submitted', 'success');
+    } else {
+      const toUnsubmit = weekEntries.filter((e) => e.statusId === 'pending_approval');
+      await Promise.all(toUnsubmit.map((e) => updateTimeEntry(e.id, { statusId: 'not_submitted', notes: e.notes || '' })));
+      showToast('Timesheet unsubmitted', 'success');
+    }
+    await loadWeekStatus();
+    await loadDay();
+  } catch (err) {
+    showToast('Failed: ' + err.message);
+  } finally {
+    submitWeekBtn.disabled = false;
+  }
+});
 
 startTimerSubmitBtn.addEventListener('click', startTimer);
 
