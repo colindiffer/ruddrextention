@@ -1,5 +1,5 @@
-import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
-import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, getTimeEntry, listMembers } from '../lib/api.js';
+import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject } from '../lib/storage.js';
+import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers } from '../lib/api.js';
 
 // --- State ---
 let currentDate = new Date();
@@ -10,6 +10,7 @@ let projects = []; // { id, name, clientName } sorted alphabetically
 let memberProjectMap = {}; // projectId -> project-member record (includes roles)
 let editingEntry = null; // null = new, object = editing
 let timerInterval = null; // setInterval handle for live timer display
+let timerState = null; // running timer derived from API — no local persistence
 let loginPollInterval = null;
 let loginPollStartedAt = 0;
 
@@ -139,36 +140,34 @@ async function isRuddrLoggedIn() {
 }
 
 // --- Timer Display ---
-async function initTimerBar() {
-  const state = await getTimerState();
-  if (state && state.running) {
-    showTimerBar(state, 'running');
-    startTimerTick(state);
-  } else if (state && state.paused) {
-    showTimerBar(state, 'paused');
+function initTimerBar() {
+  stopTimerTick();
+  const timerEntry = entries.find((e) => e.timerStartedAt);
+  if (timerEntry) {
+    timerState = {
+      entryId: timerEntry.id,
+      projectId: timerEntry.project?.id || '',
+      projectName: timerEntry.project?.name || '',
+      notes: timerEntry.notes || '',
+      startedAt: new Date(timerEntry.timerStartedAt).getTime(),
+      accumulatedMinutes: timerEntry.minutes || 0,
+    };
+    showTimerBar(timerState);
+    startTimerTick(timerState);
   } else {
+    timerState = null;
     timerBar.classList.add('hidden');
   }
 }
 
-function showTimerBar(state, mode) {
+function showTimerBar(state) {
   timerBar.classList.remove('hidden', 'paused');
   const project = projects.find((p) => p.id === state.projectId);
   timerProject.textContent = project ? project.name : (state.projectName || 'Timer');
-
-  if (mode === 'running') {
-    updateTimerDisplay(state);
-    timerStopBtn.classList.remove('hidden');
-    timerResumeBtn.classList.add('hidden');
-    timerDismissBtn.classList.add('hidden');
-  } else {
-    // Paused
-    timerBar.classList.add('paused');
-    timerDisplay.textContent = formatElapsedMinutes(state.accumulatedMinutes || 0);
-    timerStopBtn.classList.add('hidden');
-    timerResumeBtn.classList.remove('hidden');
-    timerDismissBtn.classList.remove('hidden');
-  }
+  updateTimerDisplay(state);
+  timerStopBtn.classList.remove('hidden');
+  timerResumeBtn.classList.add('hidden');
+  timerDismissBtn.classList.add('hidden');
 }
 
 function updateTimerDisplay(state) {
@@ -221,7 +220,6 @@ async function startAppView() {
   stopLoginPolling();
   showView(weeklyView);
   await loadDay();
-  await initTimerBar();
 }
 
 function showSetupView() {
@@ -378,6 +376,7 @@ async function loadDay() {
     const allEntries = response.results || [];
     entries = allEntries.filter((e) => e.date === dateStr);
     renderDay();
+    initTimerBar();
   } catch (err) {
     dayContainer.innerHTML = `<div class="empty-state">Failed to load entries.<br><small>${err.message}</small></div>`;
   }
@@ -606,44 +605,17 @@ async function loadProjectDetails(projectId) {
 
 // --- Start Timer on Existing Entry (from weekly view) ---
 async function startTimerOnEntry(entry) {
-  const currentState = await getTimerState();
-  if (currentState && currentState.running) {
-    await pauseTimer();
-  }
-  const afterPause = await getTimerState();
-  if (afterPause && afterPause.paused) {
-    await clearTimerState();
-  }
-
-  const startedAt = Date.now();
-  try {
-    let apiTimer = false;
+  if (timerState && timerState.entryId === entry.id) return; // already running on this entry
+  if (timerState) {
     try {
-      await updateTimeEntry(entry.id, { timerStartedAt: new Date().toISOString(), notes: entry.notes || '' });
-      apiTimer = true;
-    } catch {
-      // API doesn't support timerStartedAt, use local
-    }
-
-    const timerState = {
-      running: true,
-      paused: false,
-      entryId: entry.id,
-      projectId: entry.project?.id || '',
-      projectName: entry.project?.name || '',
-      taskId: entry.task?.id || null,
-      roleId: entry.role?.id || null,
-      notes: entry.notes || '',
-      startedAt,
-      accumulatedMinutes: entry.minutes || 0,
-      apiTimer,
-    };
-    await setTimerState(timerState);
+      await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+    } catch { /* silent */ }
+  }
+  try {
+    await updateTimeEntry(entry.id, { timerStartedAt: new Date().toISOString(), notes: entry.notes || '' });
     chrome.runtime.sendMessage({ type: 'timerStarted' });
-
-    showTimerBar(timerState, 'running');
-    startTimerTick(timerState);
     showToast('Timer started', 'success');
+    await loadDay();
   } catch (err) {
     showToast('Failed to start timer: ' + err.message);
   }
@@ -665,26 +637,19 @@ async function startTimer() {
     return;
   }
 
-  // If a timer is already running, pause it first
-  const currentState = await getTimerState();
-  if (currentState && currentState.running) {
-    await pauseTimer();
-  }
-  // Dismiss any paused timer silently
-  const afterPause = await getTimerState();
-  if (afterPause && afterPause.paused) {
-    await clearTimerState();
-  }
-
   startTimerSubmitBtn.disabled = true;
+
+  // Stop any running timer first
+  if (timerState) {
+    try {
+      await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+    } catch { /* silent */ }
+  }
 
   const memberId = await getMemberId();
   const project = projects.find((p) => p.id === projectId);
-  const startedAt = Date.now();
   const today = formatDate(new Date());
 
-  // If editing an existing entry, start timer on that entry
-  // Otherwise check for existing entry today with same project+task
   const targetEntry = editingEntry || entries.find((e) =>
     e.date === today &&
     e.project?.id === projectId &&
@@ -693,31 +658,8 @@ async function startTimer() {
 
   try {
     if (targetEntry) {
-      // Start timer on existing entry
-      let apiTimer = false;
-      try {
-        await updateTimeEntry(targetEntry.id, { timerStartedAt: new Date().toISOString(), notes: targetEntry.notes || notes });
-        apiTimer = true;
-      } catch {
-        // API doesn't support timerStartedAt, use local
-      }
-
-      const timerState = {
-        running: true,
-        paused: false,
-        entryId: targetEntry.id,
-        projectId,
-        projectName: project?.name || '',
-        taskId,
-        roleId,
-        notes: targetEntry.notes || notes,
-        startedAt,
-        accumulatedMinutes: targetEntry.minutes || 0,
-        apiTimer,
-      };
-      await setTimerState(timerState);
+      await updateTimeEntry(targetEntry.id, { timerStartedAt: new Date().toISOString(), notes: targetEntry.notes || notes });
     } else {
-      // Create a new entry
       const data = {
         typeId: 'project_time',
         projectId,
@@ -725,35 +667,11 @@ async function startTimer() {
         date: today,
         minutes: 1,
         notes,
+        timerStartedAt: new Date().toISOString(),
       };
       if (taskId) data.taskId = taskId;
       if (roleId) data.roleId = roleId;
-
-      let apiTimer = false;
-      let created;
-      try {
-        data.timerStartedAt = new Date().toISOString();
-        created = await createTimeEntry(data);
-        apiTimer = true;
-      } catch {
-        delete data.timerStartedAt;
-        created = await createTimeEntry(data);
-      }
-
-      const timerState = {
-        running: true,
-        paused: false,
-        entryId: created.id,
-        projectId,
-        projectName: project?.name || '',
-        taskId,
-        roleId,
-        notes,
-        startedAt,
-        accumulatedMinutes: 0,
-        apiTimer,
-      };
-      await setTimerState(timerState);
+      await createTimeEntry(data);
     }
 
     await setLastUsedProjectId(projectId);
@@ -761,11 +679,7 @@ async function startTimer() {
     if (project) await addRecentProject({ id: project.id, name: project.name, clientName: project.clientName });
 
     chrome.runtime.sendMessage({ type: 'timerStarted' });
-
-    const state = await getTimerState();
     showView(weeklyView);
-    showTimerBar(state, 'running');
-    startTimerTick(state);
     showToast('Timer started', 'success');
     await loadDay();
   } catch (err) {
@@ -775,125 +689,22 @@ async function startTimer() {
   startTimerSubmitBtn.disabled = false;
 }
 
-// --- Timer Pause ---
-async function pauseTimer() {
-  const state = await getTimerState();
-  if (!state || !state.running) return;
-
+// --- Timer Stop ---
+async function stopTimer() {
+  if (!timerState) return;
   timerStopBtn.disabled = true;
-  const elapsedMs = Date.now() - state.startedAt;
-  const elapsedMinutes = Math.max(1, Math.round(elapsedMs / 60000));
-  const totalAccumulated = (state.accumulatedMinutes || 0) + elapsedMinutes;
-
   try {
-    if (state.apiTimer && state.entryId) {
-      // Pause API timer: clear timerStartedAt, API calculates minutes
-      await updateTimeEntry(state.entryId, { timerStartedAt: null, notes: state.notes || '' });
-      // Fetch entry to get actual accumulated minutes from API
-      try {
-        const entry = await getTimeEntry(state.entryId);
-        if (entry && entry.minutes != null) {
-          // Use API's calculated total
-          const pausedState = {
-            ...state,
-            running: false,
-            paused: true,
-            accumulatedMinutes: entry.minutes,
-            startedAt: null,
-          };
-          await setTimerState(pausedState);
-          showTimerBar(pausedState, 'paused');
-          showToast(`Timer paused \u2014 ${minutesToHours(entry.minutes)}h so far`, 'success');
-          stopTimerTick();
-          timerStopBtn.disabled = false;
-          chrome.runtime.sendMessage({ type: 'timerStopped' });
-          await loadDay();
-          return;
-        }
-      } catch {
-        // Fall through to use local calculation
-      }
-    } else if (!state.entryId) {
-      // Local timer, first pause: create the entry now
-      const memberId = await getMemberId();
-      const data = {
-        typeId: 'project_time',
-        projectId: state.projectId,
-        memberId,
-        date: formatDate(new Date()),
-        minutes: totalAccumulated,
-        notes: state.notes || '',
-      };
-      if (state.taskId) data.taskId = state.taskId;
-      if (state.roleId) data.roleId = state.roleId;
-      const created = await createTimeEntry(data);
-      state.entryId = created.id;
-    } else {
-      // Local timer with existing entry: update minutes
-      await updateTimeEntry(state.entryId, { minutes: totalAccumulated, notes: state.notes || '' });
-    }
-
-    const pausedState = {
-      ...state,
-      running: false,
-      paused: true,
-      accumulatedMinutes: totalAccumulated,
-      startedAt: null,
-    };
-    await setTimerState(pausedState);
-    showTimerBar(pausedState, 'paused');
-    showToast(`Timer paused \u2014 ${minutesToHours(totalAccumulated)}h so far`, 'success');
+    await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+    timerState = null;
+    stopTimerTick();
+    timerBar.classList.add('hidden');
+    chrome.runtime.sendMessage({ type: 'timerStopped' });
+    showToast('Timer stopped', 'success');
+    await loadDay();
   } catch (err) {
-    showToast('Failed to pause timer: ' + err.message);
+    showToast('Failed to stop timer: ' + err.message);
   }
-
-  stopTimerTick();
   timerStopBtn.disabled = false;
-  chrome.runtime.sendMessage({ type: 'timerStopped' });
-  await loadDay();
-}
-
-// --- Timer Resume ---
-async function resumeTimer() {
-  const state = await getTimerState();
-  if (!state || !state.paused) return;
-
-  timerResumeBtn.disabled = true;
-  const startedAt = Date.now();
-
-  try {
-    if (state.apiTimer && state.entryId) {
-      // Resume API timer: set timerStartedAt again
-      await updateTimeEntry(state.entryId, { timerStartedAt: new Date().toISOString(), notes: state.notes || '' });
-    }
-
-    const runningState = {
-      ...state,
-      running: true,
-      paused: false,
-      startedAt,
-    };
-    await setTimerState(runningState);
-
-    chrome.runtime.sendMessage({ type: 'timerStarted' });
-
-    showTimerBar(runningState, 'running');
-    startTimerTick(runningState);
-    showToast('Timer resumed', 'success');
-  } catch (err) {
-    showToast('Failed to resume timer: ' + err.message);
-  }
-
-  timerResumeBtn.disabled = false;
-}
-
-// --- Timer Dismiss ---
-async function dismissTimer() {
-  await clearTimerState();
-  stopTimerTick();
-  timerBar.classList.add('hidden');
-  chrome.runtime.sendMessage({ type: 'timerStopped' });
-  showToast('Timer dismissed', 'success');
 }
 
 // --- Event Listeners ---
@@ -931,9 +742,7 @@ currentDayLabel.addEventListener('click', () => {
 
 addEntryBtn.addEventListener('click', () => openEntryForm());
 
-timerStopBtn.addEventListener('click', pauseTimer);
-timerResumeBtn.addEventListener('click', resumeTimer);
-timerDismissBtn.addEventListener('click', dismissTimer);
+timerStopBtn.addEventListener('click', stopTimer);
 
 submitWeekBtn.addEventListener('click', async () => {
   const action = submitWeekBtn.dataset.action;
@@ -1082,9 +891,9 @@ deleteConfirmBtn.addEventListener('click', async () => {
   }
 });
 
-// --- Reset to today on focus (popup left open past midnight) ---
+// --- Reload on focus: reset to today and pick up timer/entry changes from other clients ---
 window.addEventListener('focus', () => {
-  if (!isToday(currentDate) && !weeklyView.classList.contains('hidden')) {
+  if (!weeklyView.classList.contains('hidden')) {
     currentDate = new Date();
     currentDate.setHours(0, 0, 0, 0);
     loadDay();
