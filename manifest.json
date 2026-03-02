@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Ruddr Time Tracker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Log time, view your week, and manage time entries in Ruddr without leaving your browser.",
-  "permissions": ["storage", "alarms", "notifications"],
-  "host_permissions": ["https://www.ruddr.io/*"],
+  "permissions": ["storage", "alarms", "notifications", "cookies"],
+  "host_permissions": ["https://*.ruddr.io/*", "https://ruddr.io/*", "https://*.cloudfunctions.net/*"],
   "action": {
     "default_popup": "popup/popup.html",
     "default_icon": {
