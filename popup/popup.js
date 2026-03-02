@@ -298,7 +298,9 @@ async function loadWeekStatus() {
       dateOnOrAfter: formatDate(weekStart),
       dateOnOrBefore: formatDate(weekEnd),
     });
-    weekEntries = response.results || [];
+    const weekStartStr = formatDate(weekStart);
+    const weekEndStr = formatDate(weekEnd);
+    weekEntries = (response.results || []).filter((e) => e.date >= weekStartStr && e.date <= weekEndStr);
     renderWeekStatus();
   } catch {
     // fail silently
@@ -1077,6 +1079,15 @@ deleteConfirmBtn.addEventListener('click', async () => {
   } finally {
     deleteConfirmBtn.disabled = false;
     deleteConfirmBtn.textContent = 'Delete';
+  }
+});
+
+// --- Reset to today on focus (popup left open past midnight) ---
+window.addEventListener('focus', () => {
+  if (!isToday(currentDate) && !weeklyView.classList.contains('hidden')) {
+    currentDate = new Date();
+    currentDate.setHours(0, 0, 0, 0);
+    loadDay();
   }
 });
 
