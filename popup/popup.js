@@ -1,4 +1,4 @@
-import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject } from '../lib/storage.js';
+import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
 import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers } from '../lib/api.js';
 
 // --- State ---
@@ -140,20 +140,13 @@ async function isRuddrLoggedIn() {
 }
 
 // --- Timer Display ---
-function initTimerBar() {
+async function initTimerBar() {
   stopTimerTick();
-  const timerEntry = entries.find((e) => e.timerStartedAt);
-  if (timerEntry) {
-    timerState = {
-      entryId: timerEntry.id,
-      projectId: timerEntry.project?.id || '',
-      projectName: timerEntry.project?.name || '',
-      notes: timerEntry.notes || '',
-      startedAt: new Date(timerEntry.timerStartedAt).getTime(),
-      accumulatedMinutes: timerEntry.minutes || 0,
-    };
-    showTimerBar(timerState);
-    startTimerTick(timerState);
+  const state = await getTimerState();
+  if (state) {
+    timerState = state;
+    showTimerBar(state);
+    startTimerTick(state);
   } else {
     timerState = null;
     timerBar.classList.add('hidden');
@@ -607,12 +600,28 @@ async function loadProjectDetails(projectId) {
 async function startTimerOnEntry(entry) {
   if (timerState && timerState.entryId === entry.id) return; // already running on this entry
   if (timerState) {
+    // Commit existing timer silently before starting new one
+    const elapsedMs = Date.now() - timerState.startedAt;
+    const elapsedMinutes = Math.max(1, Math.round(elapsedMs / 60000));
+    const totalMinutes = (timerState.accumulatedMinutes || 0) + elapsedMinutes;
     try {
-      await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+      await updateTimeEntry(timerState.entryId, { minutes: totalMinutes, notes: timerState.notes || '' });
     } catch { /* silent */ }
+    stopTimerTick();
   }
+  const state = {
+    entryId: entry.id,
+    projectId: entry.project?.id || '',
+    projectName: entry.project?.name || '',
+    notes: entry.notes || '',
+    startedAt: Date.now(),
+    accumulatedMinutes: entry.minutes || 0,
+  };
   try {
-    await updateTimeEntry(entry.id, { timerStartedAt: new Date().toISOString(), notes: entry.notes || '' });
+    await setTimerState(state);
+    timerState = state;
+    showTimerBar(state);
+    startTimerTick(state);
     chrome.runtime.sendMessage({ type: 'timerStarted' });
     showToast('Timer started', 'success');
     await loadDay();
@@ -639,11 +648,17 @@ async function startTimer() {
 
   startTimerSubmitBtn.disabled = true;
 
-  // Stop any running timer first
+  // Commit any running timer first
   if (timerState) {
+    const elapsedMs = Date.now() - timerState.startedAt;
+    const elapsedMinutes = Math.max(1, Math.round(elapsedMs / 60000));
+    const totalMinutes = (timerState.accumulatedMinutes || 0) + elapsedMinutes;
     try {
-      await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+      await updateTimeEntry(timerState.entryId, { minutes: totalMinutes, notes: timerState.notes || '' });
     } catch { /* silent */ }
+    stopTimerTick();
+    timerState = null;
+    await clearTimerState();
   }
 
   const memberId = await getMemberId();
@@ -657,22 +672,22 @@ async function startTimer() {
   );
 
   try {
+    let entryId, accumulatedMinutes;
     if (targetEntry) {
-      await updateTimeEntry(targetEntry.id, { timerStartedAt: new Date().toISOString(), notes: targetEntry.notes || notes });
+      entryId = targetEntry.id;
+      accumulatedMinutes = targetEntry.minutes || 0;
     } else {
-      const data = {
-        typeId: 'project_time',
-        projectId,
-        memberId,
-        date: today,
-        minutes: 1,
-        notes,
-        timerStartedAt: new Date().toISOString(),
-      };
+      const data = { typeId: 'project_time', projectId, memberId, date: today, minutes: 1, notes };
       if (taskId) data.taskId = taskId;
       if (roleId) data.roleId = roleId;
-      await createTimeEntry(data);
+      const created = await createTimeEntry(data);
+      entryId = created.id;
+      accumulatedMinutes = 0;
     }
+
+    const state = { entryId, projectId, projectName: project?.name || '', notes, startedAt: Date.now(), accumulatedMinutes };
+    await setTimerState(state);
+    timerState = state;
 
     await setLastUsedProjectId(projectId);
     if (taskId) await setLastUsedTaskId(taskId);
@@ -680,6 +695,8 @@ async function startTimer() {
 
     chrome.runtime.sendMessage({ type: 'timerStarted' });
     showView(weeklyView);
+    showTimerBar(state);
+    startTimerTick(state);
     showToast('Timer started', 'success');
     await loadDay();
   } catch (err) {
@@ -694,7 +711,11 @@ async function stopTimer() {
   if (!timerState) return;
   timerStopBtn.disabled = true;
   try {
-    await updateTimeEntry(timerState.entryId, { timerStartedAt: null, notes: timerState.notes || '' });
+    const elapsedMs = Date.now() - timerState.startedAt;
+    const elapsedMinutes = Math.max(1, Math.round(elapsedMs / 60000));
+    const totalMinutes = (timerState.accumulatedMinutes || 0) + elapsedMinutes;
+    await updateTimeEntry(timerState.entryId, { minutes: totalMinutes, notes: timerState.notes || '' });
+    await clearTimerState();
     timerState = null;
     stopTimerTick();
     timerBar.classList.add('hidden');
