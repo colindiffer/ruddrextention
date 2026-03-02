@@ -12,6 +12,7 @@ let editingEntry = null; // null = new, object = editing
 let timerInterval = null; // setInterval handle for live timer display
 let timerState = null; // running timer derived from API — no local persistence
 let loginPollInterval = null;
+let lastLoadAt = 0; // debounce focus reloads
 let loginPollStartedAt = 0;
 
 // --- DOM refs ---
@@ -169,11 +170,6 @@ function updateTimerDisplay(state) {
   timerDisplay.textContent = formatElapsed(elapsedMs + accMs);
 }
 
-function formatElapsedMinutes(minutes) {
-  const h = Math.floor(minutes / 60);
-  const m = Math.round(minutes % 60);
-  return `${h}:${String(m).padStart(2, '0')}:00`;
-}
 
 function startTimerTick(state) {
   if (timerInterval) clearInterval(timerInterval);
@@ -221,7 +217,7 @@ function showSetupView() {
 }
 
 const LOGIN_POLL_INTERVAL_MS = 2000;
-const LOGIN_POLL_TIMEOUT_MS = 60000;
+const LOGIN_POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 function startLoginPolling() {
   if (loginPollInterval) return;
@@ -348,6 +344,7 @@ function renderWeekStatus() {
 
 // --- Day View ---
 async function loadDay() {
+  lastLoadAt = Date.now();
   const loggedIn = await isRuddrLoggedIn();
   if (!loggedIn) {
     showSetupView();
@@ -386,7 +383,8 @@ function updateDayLabel() {
 
 function renderDay() {
   if (entries.length === 0) {
-    dayContainer.innerHTML = '<div class="empty-state">No entries today.<br>Click "+ New Entry" to add one.</div>';
+    const dayLabel = isToday(currentDate) ? 'today' : 'on ' + formatDayLabel(currentDate);
+    dayContainer.innerHTML = `<div class="empty-state">No entries ${dayLabel}.<br>Click "+ New Entry" to add one.</div>`;
     dailyTotalEl.textContent = '0h';
     return;
   }
@@ -408,14 +406,12 @@ function renderDay() {
         taskId,
         taskName: e.task?.name || '',
         totalMinutes: 0,
-        entryIds: [],
         entries: [],
       };
       groups.push(groupMap[key]);
     }
 
     groupMap[key].totalMinutes += (e.minutes || 0);
-    groupMap[key].entryIds.push(e.id);
     groupMap[key].entries.push(e);
   });
 
@@ -606,7 +602,9 @@ async function startTimerOnEntry(entry) {
     const totalMinutes = (timerState.accumulatedMinutes || 0) + elapsedMinutes;
     try {
       await updateTimeEntry(timerState.entryId, { minutes: totalMinutes, notes: timerState.notes || '' });
-    } catch { /* silent */ }
+    } catch {
+      showToast('Warning: previous timer may not have saved');
+    }
     stopTimerTick();
   }
   const state = {
@@ -655,7 +653,9 @@ async function startTimer() {
     const totalMinutes = (timerState.accumulatedMinutes || 0) + elapsedMinutes;
     try {
       await updateTimeEntry(timerState.entryId, { minutes: totalMinutes, notes: timerState.notes || '' });
-    } catch { /* silent */ }
+    } catch {
+      showToast('Warning: previous timer may not have saved');
+    }
     stopTimerTick();
     timerState = null;
     await clearTimerState();
@@ -738,6 +738,8 @@ openLoginBtn.addEventListener('click', () => {
   }
   chrome.storage.local.set({ pendingEmail: email });
   setStatus(setupStatus, 'Opening Ruddr login...', 'success');
+  stopLoginPolling();
+  startLoginPolling();
   chrome.tabs.create({ url: 'https://www.ruddr.io/login' });
 });
 
@@ -912,9 +914,9 @@ deleteConfirmBtn.addEventListener('click', async () => {
   }
 });
 
-// --- Reload on focus: reset to today and pick up timer/entry changes from other clients ---
+// --- Reload on focus: reset to today, pick up changes from other clients (debounced 30s) ---
 window.addEventListener('focus', () => {
-  if (!weeklyView.classList.contains('hidden')) {
+  if (!weeklyView.classList.contains('hidden') && Date.now() - lastLoadAt > 30000) {
     currentDate = new Date();
     currentDate.setHours(0, 0, 0, 0);
     loadDay();
