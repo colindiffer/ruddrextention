@@ -1,5 +1,6 @@
 import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
 import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers } from '../lib/api.js';
+import { trackEvent, trackView } from '../lib/analytics.js';
 
 // --- State ---
 let currentDate = new Date();
@@ -113,6 +114,13 @@ function setStatus(el, message, type = '') {
 function showView(view) {
   [setupView, weeklyView, entryView].forEach((v) => v.classList.add('hidden'));
   view.classList.remove('hidden');
+
+  const viewNames = {
+    [setupView.id]: 'Setup',
+    [weeklyView.id]: 'Weekly View',
+    [entryView.id]: 'Entry Form'
+  };
+  trackView(viewNames[view.id] || view.id);
 }
 
 function formatElapsed(ms) {
@@ -194,6 +202,7 @@ async function init() {
     if (loggedIn && !memberId) {
       const linked = await attemptLinkMemberFromPendingEmail();
       if (linked) {
+        trackEvent('login_success', { method: 'cookie_link' });
         await startAppView();
         return;
       }
@@ -202,6 +211,7 @@ async function init() {
     return;
   }
 
+  trackEvent('app_start');
   await startAppView();
 }
 
@@ -266,6 +276,7 @@ async function attemptLinkMemberFromPendingEmail() {
     await chrome.storage.local.set({ memberName: match.name, memberEmail: match.email || pendingEmail });
     showToast(`Signed in as ${match.name}`, 'success');
     setStatus(setupStatus, '', '');
+    trackEvent('login_success', { method: 'manual_email' });
     return true;
   } catch (err) {
     console.error('Linking failed:', err);
@@ -622,6 +633,7 @@ async function startTimerOnEntry(entry) {
     startTimerTick(state);
     chrome.runtime.sendMessage({ type: 'timerStarted' });
     showToast('Timer started', 'success');
+    trackEvent('timer_start', { source: 'weekly_view' });
     await loadDay();
   } catch (err) {
     showToast('Failed to start timer: ' + err.message);
@@ -698,6 +710,7 @@ async function startTimer() {
     showTimerBar(state);
     startTimerTick(state);
     showToast('Timer started', 'success');
+    trackEvent('timer_start', { source: 'entry_form', is_new: !targetEntry });
     await loadDay();
   } catch (err) {
     showToast('Failed to start timer: ' + err.message);
@@ -721,6 +734,7 @@ async function stopTimer() {
     timerBar.classList.add('hidden');
     chrome.runtime.sendMessage({ type: 'timerStopped' });
     showToast('Timer stopped', 'success');
+    trackEvent('timer_stop', { duration_minutes: elapsedMinutes });
     await loadDay();
   } catch (err) {
     showToast('Failed to stop timer: ' + err.message);
@@ -778,10 +792,12 @@ submitWeekBtn.addEventListener('click', async () => {
       });
       await Promise.all(toSubmit.map((e) => updateTimeEntry(e.id, { statusId: 'pending_approval', notes: e.notes || '' })));
       showToast('Timesheet submitted', 'success');
+      trackEvent('week_submit');
     } else {
       const toUnsubmit = weekEntries.filter((e) => e.statusId === 'pending_approval');
       await Promise.all(toUnsubmit.map((e) => updateTimeEntry(e.id, { statusId: 'not_submitted', notes: e.notes || '' })));
       showToast('Timesheet unsubmitted', 'success');
+      trackEvent('week_unsubmit');
     }
     await loadWeekStatus();
     await loadDay();
@@ -864,9 +880,11 @@ entryForm.addEventListener('submit', async (e) => {
     if (editingEntry) {
       await updateTimeEntry(editingEntry.id, data);
       showToast('Entry updated', 'success');
+      trackEvent('entry_save', { action: 'update' });
     } else {
       await createTimeEntry(data);
       showToast('Entry created', 'success');
+      trackEvent('entry_save', { action: 'create' });
     }
 
     // Remember last used project/task

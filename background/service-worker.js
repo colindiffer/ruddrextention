@@ -1,5 +1,37 @@
 const BASE_URL = 'https://www.ruddr.io/api/workspace';
-const API_KEY = 'QlKTlnnk98UsRyFLd08KGoZwxOoYNLJZpBGPevZ6pmKjEDJztSPAjaWXWGxhfqB6qdoAcnpeflCv3z5DpVBPvhVXxMi7SgvmkegM';
+const CLOUD_FUNCTION_URL = 'https://europe-west2-ruddr-reporting.cloudfunctions.net/getRuddrApiKey';
+const SHARED_SECRET = '0b62f8e167ae0e7b5019c994be1b9003052fbda661c17776dd59deb84d03ab74';
+const KEY_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+async function getApiKey() {
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.get('apiKeyCache', async (result) => {
+      const cache = result.apiKeyCache;
+      const now = Date.now();
+
+      if (cache && cache.key && (now - cache.fetchedAt) < KEY_CACHE_TTL) {
+        resolve(cache.key);
+        return;
+      }
+
+      try {
+        const response = await fetch(CLOUD_FUNCTION_URL, {
+          headers: { 'Authorization': `Bearer ${SHARED_SECRET}` },
+        });
+        if (!response.ok) throw new Error(`Key fetch failed (${response.status})`);
+        const { key } = await response.json();
+        await chrome.storage.local.set({ apiKeyCache: { key, fetchedAt: now } });
+        resolve(key);
+      } catch (err) {
+        if (cache && cache.key) {
+          resolve(cache.key);
+        } else {
+          reject(new Error('Unable to retrieve API key'));
+        }
+      }
+    });
+  });
+}
 
 // --- Install & Startup ---
 chrome.runtime.onInstalled.addListener(() => {
@@ -100,7 +132,7 @@ async function updateBadge() {
     return;
   }
 
-  // No timer running — clear badge
+  // No timer running -- clear badge
   chrome.action.setBadgeText({ text: '' });
 }
 
@@ -165,8 +197,9 @@ async function handleEndOfDayReminder() {
       limit: '100',
     });
 
+    const apiKey = await getApiKey();
     const response = await fetch(`${BASE_URL}/time-entries?${params}`, {
-      headers: { 'Authorization': `Bearer ${API_KEY}` },
+      headers: { 'Authorization': `Bearer ${apiKey}` },
     });
 
     if (!response.ok) return;
@@ -220,8 +253,9 @@ async function handlePeriodicReminder() {
       limit: '100',
     });
 
+    const apiKey = await getApiKey();
     const response = await fetch(`${BASE_URL}/time-entries?${params}`, {
-      headers: { 'Authorization': `Bearer ${API_KEY}` },
+      headers: { 'Authorization': `Bearer ${apiKey}` },
     });
 
     if (!response.ok) return;

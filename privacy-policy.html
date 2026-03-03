@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy – Ruddr Time Tracker</title>
+  <style>
+    body { font-family: sans-serif; max-width: 720px; margin: 40px auto; padding: 0 20px; color: #333; line-height: 1.6; }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; }
+    p, li { font-size: 0.95rem; }
+  </style>
+</head>
+<body>
+  <h1>Privacy Policy – Ruddr Time Tracker</h1>
+  <p><strong>Last updated: February 2026</strong></p>
+
+  <p>Ruddr Time Tracker is a Chrome extension developed for internal use at Propellernet. This policy explains what data the extension accesses and how it is handled.</p>
+
+  <h2>Data stored locally</h2>
+  <p>The extension stores the following data in your browser's local storage (<code>chrome.storage.local</code>). This data never leaves your device except where explicitly stated below.</p>
+  <ul>
+    <li><strong>Member ID and name</strong> – your Ruddr workspace identity, used to filter time entries to your account.</li>
+    <li><strong>Recent projects</strong> – the last 5 projects you logged time against, used to speed up entry creation.</li>
+    <li><strong>Timer state</strong> – whether a timer is running and when it started.</li>
+    <li><strong>Reminder settings</strong> – your end-of-day and periodic reminder preferences.</li>
+    <li><strong>API key cache</strong> – a temporary copy of the Ruddr API key fetched from a secure internal endpoint, cached for up to 24 hours.</li>
+  </ul>
+
+  <h2>Network requests</h2>
+  <p>The extension makes network requests to the following services:</p>
+  <ul>
+    <li><strong>ruddr.io</strong> – to read and write your time entries via the Ruddr API. Requests are authenticated with your organisation's API key.</li>
+    <li><strong>Google Cloud Functions (europe-west2)</strong> – a Propellernet-managed endpoint used solely to deliver the Ruddr API key to the extension. No personal data is sent to this endpoint.</li>
+  </ul>
+
+  <h2>Cookie access</h2>
+  <p>The extension reads browser cookies for <code>ruddr.io</code> to check whether you are currently logged in before making API calls. Cookies are read-only and are not modified or transmitted.</p>
+
+  <h2>Notifications</h2>
+  <p>The extension may display browser notifications to remind you to log your time. These are generated entirely on your device and do not involve any external service.</p>
+
+  <h2>Data sharing</h2>
+  <p>No personal data is shared with any third party. The only external services contacted are Ruddr (your time tracking platform) and a Propellernet-controlled Google Cloud endpoint.</p>
+
+  <h2>Data retention</h2>
+  <p>All locally stored data is held in your browser and is removed when you uninstall the extension. No data is retained on any server operated by this extension.</p>
+
+  <h2>Contact</h2>
+  <p>This extension is maintained by Propellernet. For questions, contact your internal analytics team.</p>
+</body>
+</html>
