@@ -31,6 +31,7 @@ function setStatus(el, message, type = '') {
 async function init() {
   trackView('Settings');
   await loadReminderSettings();
+  document.getElementById('appVersion').textContent = `v${chrome.runtime.getManifest().version}`;
 }
 
 // --- Reminder Settings ---

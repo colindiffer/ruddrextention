@@ -199,3 +199,19 @@
 .toggle-label input:checked + .toggle-switch::after {
   transform: translateX(16px);
 }
+
+.about-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+
+.about-label {
+  color: var(--color-text-secondary);
+}
+
+.about-value {
+  font-weight: 500;
+  color: var(--color-text);
+}
