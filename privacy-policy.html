@@ -32,6 +32,7 @@
   <ul>
     <li><strong>ruddr.io</strong> – to read and write your time entries via the Ruddr API. Requests are authenticated with your organisation's API key.</li>
     <li><strong>Google Cloud Functions (europe-west2)</strong> – a Propellernet-managed endpoint used solely to deliver the Ruddr API key to the extension. No personal data is sent to this endpoint.</li>
+    <li><strong>Google Analytics (GA4)</strong> – anonymous usage events (e.g. timer started, entry saved) are sent via the GA4 Measurement Protocol. Events include a randomly generated client ID stored in <code>chrome.storage.local</code>; no personally identifiable information is transmitted. This data is used solely to understand how the extension is used and to improve it.</li>
   </ul>
 
   <h2>Cookie access</h2>
@@ -41,7 +42,7 @@
   <p>The extension may display browser notifications to remind you to log your time. These are generated entirely on your device and do not involve any external service.</p>
 
   <h2>Data sharing</h2>
-  <p>No personal data is shared with any third party. The only external services contacted are Ruddr (your time tracking platform) and a Propellernet-controlled Google Cloud endpoint.</p>
+  <p>No personally identifiable data is shared with any third party. Anonymous usage analytics are sent to Google Analytics (see above). All other external services contacted are Ruddr (your time tracking platform) and a Propellernet-controlled Google Cloud endpoint.</p>
 
   <h2>Data retention</h2>
   <p>All locally stored data is held in your browser and is removed when you uninstall the extension. No data is retained on any server operated by this extension.</p>
