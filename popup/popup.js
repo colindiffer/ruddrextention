@@ -1219,12 +1219,24 @@ submitWeekBtn.addEventListener('click', async () => {
   submitWeekBtn.disabled = true;
   try {
     if (action === 'submit') {
-      const toSubmit = weekEntries.filter((e) => {
+      const zeroHourEntries = weekEntries.filter((e) => (e.minutes || 0) === 0);
+      if (zeroHourEntries.length > 0) {
+        await Promise.all(zeroHourEntries.map((e) => deleteTimeEntry(e.id)));
+      }
+      const submittable = weekEntries.filter((e) => {
+        if ((e.minutes || 0) === 0) return false;
         const s = e.statusId || 'not_submitted';
         return s === 'not_submitted' || s === 'rejected';
       });
-      await Promise.all(toSubmit.map((e) => updateTimeEntry(e.id, { statusId: 'pending_approval', notes: e.notes || '' })));
-      showToast('Timesheet submitted', 'success');
+      if (submittable.length === 0) {
+        const n = zeroHourEntries.length;
+        showToast(n > 0 ? `${n} empty ${n === 1 ? 'entry' : 'entries'} removed` : 'Nothing to submit');
+        return;
+      }
+      await Promise.all(submittable.map((e) => updateTimeEntry(e.id, { statusId: 'pending_approval', notes: e.notes || '' })));
+      const n = zeroHourEntries.length;
+      const removedMsg = n > 0 ? ` (${n} empty ${n === 1 ? 'entry' : 'entries'} removed)` : '';
+      showToast(`Timesheet submitted${removedMsg}`, 'success');
       trackEvent('week_submit');
     } else {
       const toUnsubmit = weekEntries.filter((e) => e.statusId === 'pending_approval');
