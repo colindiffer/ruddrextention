@@ -1,5 +1,5 @@
-import { getMemberId, setMemberId, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState } from '../lib/storage.js';
-import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers } from '../lib/api.js';
+import { getMemberId, setMemberId, getMemberEmail, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState, getFavouriteProjects, setFavouriteProjects } from '../lib/storage.js';
+import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers, getProject, listAllocationsForMember } from '../lib/api.js';
 import { trackEvent, trackView } from '../lib/analytics.js';
 
 // --- State ---
@@ -15,18 +15,25 @@ let timerState = null; // running timer derived from API — no local persistenc
 let loginPollInterval = null;
 let lastLoadAt = 0; // debounce focus reloads
 let loginPollStartedAt = 0;
+let reloginMode = false; // true when session expired but memberId already known
+let projectHoursCache = {}; // projectId -> { budgetHours, loggedHours } — cleared on month change
+let monthEntriesCache = null; // { key: 'YYYY-MM', entries: [] } — shared between month total and project stats
+let allocationsCache = null; // all allocations for current member, fetched once per session
 
 // --- DOM refs ---
 const setupView = document.getElementById('setupView');
 const weeklyView = document.getElementById('weeklyView');
 const entryView = document.getElementById('entryView');
 const setupEmail = document.getElementById('setupEmail');
+const setupEmailField = document.getElementById('setupEmailField');
+const setupHeading = document.getElementById('setupHeading');
+const setupSubtitle = document.getElementById('setupSubtitle');
 const setupStatus = document.getElementById('setupStatus');
 const openLoginBtn = document.getElementById('openLoginBtn');
 const settingsBtn = document.getElementById('settingsBtn');
 const prevDayBtn = document.getElementById('prevDay');
 const nextDayBtn = document.getElementById('nextDay');
-const currentDayLabel = document.getElementById('currentDayLabel');
+const dayPillsContainer = document.getElementById('dayPills');
 const dayContainer = document.getElementById('dayContainer');
 const dailyTotalEl = document.getElementById('dailyTotal');
 const addEntryBtn = document.getElementById('addEntryBtn');
@@ -56,6 +63,22 @@ const timerDismissBtn = document.getElementById('timerDismissBtn');
 const weekHours = document.getElementById('weekHours');
 const weekStatusBadge = document.getElementById('weekStatusBadge');
 const submitWeekBtn = document.getElementById('submitWeekBtn');
+const copyLastWeekBtn = document.getElementById('copyLastWeekBtn');
+const copyModal = document.getElementById('copyModal');
+const copyCancelBtn = document.getElementById('copyCancelBtn');
+const copyConfirmBtn = document.getElementById('copyConfirmBtn');
+const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+const projectStats = document.getElementById('projectStats');
+const projectStatsBar = document.getElementById('projectStatsBar');
+const projectStatsFill = document.getElementById('projectStatsFill');
+const projectStatsText = document.getElementById('projectStatsText');
+const monthHoursLabel = document.getElementById('monthHoursLabel');
+const monthHoursEl = document.getElementById('monthHours');
+const monthOverviewBtn = document.getElementById('monthOverviewBtn');
+const monthlyPanel = document.getElementById('monthlyPanel');
+const monthlyPanelTitle = document.getElementById('monthlyPanelTitle');
+const monthlyPanelBody = document.getElementById('monthlyPanelBody');
+const monthlyPanelClose = document.getElementById('monthlyPanelClose');
 
 // --- Helpers ---
 function addDays(d, n) {
@@ -83,6 +106,10 @@ function minutesToHours(min) {
 
 function hoursToMinutes(h) {
   return Math.round(h * 60);
+}
+
+function fmtHours(h) {
+  return (h % 1 === 0 ? h : +h.toFixed(1)) + 'h';
 }
 
 function isToday(d) {
@@ -207,12 +234,44 @@ async function init() {
         return;
       }
     }
-    showSetupView();
+    // Session expired but we know who the user is — skip email entry step
+    showSetupView(!loggedIn && !!memberId);
+    return;
+  }
+
+  // Verify the stored memberId matches the expected user (once per 24h) — prevents
+  // showing another person's data if stored identity ever becomes stale or mismatched.
+  const identityValid = await verifyStoredIdentity(memberId);
+  if (!identityValid) {
+    await chrome.storage.local.remove(['memberId', 'memberName', 'memberEmail', 'identityVerifiedAt']);
+    showSetupView(false);
     return;
   }
 
   trackEvent('app_start');
   await startAppView();
+}
+
+async function verifyStoredIdentity(memberId) {
+  const VERIFY_TTL = 24 * 60 * 60 * 1000;
+  const { identityVerifiedAt } = await chrome.storage.local.get('identityVerifiedAt');
+  if (identityVerifiedAt && Date.now() - identityVerifiedAt < VERIFY_TTL) return true;
+
+  try {
+    const members = await listMembers();
+    const member = members.find((m) => m.id === memberId);
+    if (!member) return false;
+    const storedEmail = await getMemberEmail();
+    if (storedEmail && member.email && member.email.toLowerCase() !== storedEmail.toLowerCase()) {
+      console.warn('[identity] Email mismatch — stored:', storedEmail, 'actual:', member.email);
+      return false;
+    }
+    await chrome.storage.local.set({ identityVerifiedAt: Date.now() });
+    return true;
+  } catch {
+    // Network error: trust stored identity to avoid locking out users offline
+    return true;
+  }
 }
 
 async function startAppView() {
@@ -221,7 +280,19 @@ async function startAppView() {
   await loadDay();
 }
 
-function showSetupView() {
+function showSetupView(isRelogin = false) {
+  reloginMode = isRelogin;
+  if (isRelogin) {
+    setupHeading.textContent = 'Session expired';
+    setupSubtitle.textContent = 'Your session has expired. Click below to sign back in.';
+    setupEmailField.classList.add('hidden');
+    openLoginBtn.textContent = 'Sign in to Ruddr';
+  } else {
+    setupHeading.textContent = 'Welcome to Ruddr';
+    setupSubtitle.textContent = 'Enter your email, then log in to Ruddr.';
+    setupEmailField.classList.remove('hidden');
+    openLoginBtn.textContent = 'Login at Ruddr';
+  }
   showView(setupView);
   startLoginPolling();
 }
@@ -235,14 +306,16 @@ function startLoginPolling() {
   loginPollInterval = setInterval(async () => {
     if (Date.now() - loginPollStartedAt > LOGIN_POLL_TIMEOUT_MS) {
       stopLoginPolling();
-      setStatus(setupStatus, 'Still not linked. You can retry or change email.', 'error');
+      setStatus(setupStatus, reloginMode ? 'Login not detected. Try again.' : 'Still not linked. You can retry or change email.', 'error');
       return;
     }
     const loggedIn = await isRuddrLoggedIn();
     if (!loggedIn) return;
-    const linked = await attemptLinkMemberFromPendingEmail();
-    if (linked) {
+    if (reloginMode) {
       await startAppView();
+    } else {
+      const linked = await attemptLinkMemberFromPendingEmail();
+      if (linked) await startAppView();
     }
   }, LOGIN_POLL_INTERVAL_MS);
 }
@@ -353,9 +426,201 @@ function renderWeekStatus() {
   }
 }
 
+// --- Shared month entries fetch (cached per month) ---
+async function getMonthEntries() {
+  const key = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
+  if (monthEntriesCache && monthEntriesCache.key === key) return monthEntriesCache.entries;
+
+  const monthStart = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1);
+  const monthEnd = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0);
+  const memberId = await getMemberId();
+  const monthStartStr = formatDate(monthStart);
+  const monthEndStr = formatDate(monthEnd);
+  const response = await listTimeEntries({
+    memberId,
+    dateOnOrAfter: monthStartStr,
+    dateOnOrBefore: monthEndStr,
+    limit: 500,
+  });
+  const entries = (response.results || []).filter((e) => e.date >= monthStartStr && e.date <= monthEndStr);
+  monthEntriesCache = { key, entries };
+  return entries;
+}
+
+async function getAllocations() {
+  if (allocationsCache) return allocationsCache;
+  const memberId = await getMemberId();
+  allocationsCache = await listAllocationsForMember(memberId);
+  return allocationsCache;
+}
+
+function getPlannedHoursForProject(allocations, projectId) {
+  const monthStartStr = formatDate(new Date(currentDate.getFullYear(), currentDate.getMonth(), 1));
+  const monthEndStr = formatDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0));
+  return allocations
+    .filter((a) => a.project?.id === projectId)
+    .filter((a) => a.start <= monthEndStr && a.end >= monthStartStr)
+    .reduce((s, a) => s + (a.hoursPerMonth || 0), 0);
+}
+
+// --- Month Status ---
+async function loadMonthStatus() {
+  try {
+    const entries = await getMonthEntries();
+    const monthMinutes = entries.reduce((s, e) => s + (e.minutes || 0), 0);
+    monthHoursEl.textContent = fmtHours(minutesToHours(monthMinutes));
+    monthHoursLabel.classList.remove('hidden');
+  } catch {
+    // fail silently
+  }
+}
+
+async function showMonthlyOverview() {
+  const monthName = currentDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+  monthlyPanelTitle.textContent = monthName;
+  monthlyPanelBody.innerHTML = '<div class="loading-state"><div class="spinner"></div><span>Loading…</span></div>';
+  monthlyPanel.classList.remove('hidden');
+
+  try {
+    const entries = await getMonthEntries();
+
+    const projectMap = {};
+    for (const e of entries) {
+      if (!e.project) continue;
+      if ((e.task?.name || '').trim().toLowerCase() === 'account development') continue;
+      const pid = e.project.id;
+      if (!projectMap[pid]) {
+        projectMap[pid] = { id: pid, name: e.project.name || '(unknown)', minutes: 0, budgetHours: null };
+      }
+      projectMap[pid].minutes += e.minutes || 0;
+    }
+
+    const projects = Object.values(projectMap).sort((a, b) => b.minutes - a.minutes);
+
+    const allocations = await getAllocations().catch(() => []);
+    for (const p of projects) {
+      if (projectHoursCache[p.id]) {
+        p.budgetHours = projectHoursCache[p.id].budgetHours;
+      } else {
+        const planned = getPlannedHoursForProject(allocations, p.id);
+        p.budgetHours = planned > 0 ? planned : null;
+      }
+    }
+
+    const totalMinutes = projects.reduce((s, p) => s + p.minutes, 0);
+    const totalLoggedH = minutesToHours(totalMinutes);
+    const budgetedProjects = projects.filter((p) => p.budgetHours !== null);
+    const totalBudgetH = budgetedProjects.reduce((s, p) => s + p.budgetHours, 0);
+    const totalLoggedBudgetedH = budgetedProjects.reduce((s, p) => s + minutesToHours(p.minutes), 0);
+    const totalRemainingH = totalBudgetH - totalLoggedBudgetedH;
+
+    let html = '';
+
+    html += '<div class="monthly-overall">';
+    html += '<div class="monthly-overall-label">Total logged</div>';
+    html += `<div class="monthly-overall-hours">${fmtHours(totalLoggedH)}</div>`;
+    if (budgetedProjects.length > 0) {
+      const isOver = totalRemainingH < 0;
+      const pct = Math.min(100, (totalLoggedBudgetedH / totalBudgetH) * 100);
+      html += `<div class="monthly-overall-sub">${isOver ? fmtHours(-totalRemainingH) + ' over budget' : fmtHours(totalRemainingH) + ' remaining'} of ${fmtHours(totalBudgetH)} budgeted</div>`;
+      html += `<div class="monthly-overall-bar"><div class="monthly-overall-bar-fill${isOver ? ' over' : ''}" style="width:${pct}%"></div></div>`;
+    }
+    html += '</div>';
+
+    if (projects.length === 0) {
+      html += '<div class="empty-state">No entries this month</div>';
+    } else {
+      html += '<div class="monthly-section-title">By project</div>';
+      for (const p of projects) {
+        const loggedH = minutesToHours(p.minutes);
+        html += '<div class="monthly-project-item">';
+        html += `<div class="monthly-project-name">${p.name}</div>`;
+        if (p.budgetHours !== null) {
+          const pct = Math.min(100, (loggedH / p.budgetHours) * 100);
+          const over = loggedH > p.budgetHours;
+          const remaining = p.budgetHours - loggedH;
+          html += `<div class="monthly-project-bar"><div class="monthly-project-bar-fill${over ? ' over' : ''}" style="width:${pct}%"></div></div>`;
+          html += `<div class="monthly-project-stats">${fmtHours(loggedH)} of ${fmtHours(p.budgetHours)} budget · <span${over ? ' class="over-text"' : ''}>${over ? fmtHours(-remaining) + ' over' : fmtHours(remaining) + ' left'}</span></div>`;
+        } else {
+          html += `<div class="monthly-project-stats">${fmtHours(loggedH)} logged</div>`;
+        }
+        html += '</div>';
+      }
+    }
+
+    monthlyPanelBody.innerHTML = html;
+  } catch {
+    monthlyPanelBody.innerHTML = '<div class="empty-state">Failed to load overview.</div>';
+  }
+}
+
+// --- Project Hours Stats ---
+async function loadProjectStats(projectId) {
+  if (!projectStats) return;
+
+  if (projectHoursCache[projectId]) {
+    renderProjectStats(projectId, projectHoursCache[projectId]);
+    return;
+  }
+
+  projectStats.classList.remove('hidden');
+  projectStatsBar.classList.add('hidden');
+  projectStatsText.textContent = 'Loading…';
+
+  try {
+    const [allocations, monthEntries] = await Promise.all([
+      getAllocations().catch(() => []),
+      getMonthEntries().catch(() => []),
+    ]);
+
+    const plannedHours = getPlannedHoursForProject(allocations, projectId);
+    const budgetHours = plannedHours > 0 ? plannedHours : null;
+    const loggedMinutes = monthEntries
+      .filter((e) => e.project?.id === projectId)
+      .filter((e) => (e.task?.name || '').trim().toLowerCase() !== 'account development')
+      .reduce((s, e) => s + (e.minutes || 0), 0);
+    const loggedHours = minutesToHours(loggedMinutes);
+
+    const stats = { budgetHours, loggedHours };
+    projectHoursCache[projectId] = stats;
+    renderProjectStats(projectId, stats);
+  } catch {
+    projectStats.classList.add('hidden');
+  }
+}
+
+function renderProjectStats(projectId, { budgetHours, loggedHours }) {
+  projectStats.classList.remove('hidden');
+
+  const monthName = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1)
+    .toLocaleString('default', { month: 'long' });
+
+  if (budgetHours) {
+    const remaining = budgetHours - loggedHours;
+    const isOver = remaining < 0;
+    const pct = Math.min(100, Math.round((loggedHours / budgetHours) * 100));
+
+    projectStatsBar.classList.remove('hidden');
+    projectStatsFill.style.width = `${pct}%`;
+    projectStatsFill.className = 'project-stats-fill' + (isOver ? ' over-budget' : '');
+
+    const pctText = `${pct}%`;
+    const remainText = isOver
+      ? `${fmtHours(Math.abs(remaining))} over`
+      : `${fmtHours(remaining)} left`;
+    projectStatsText.textContent = `${monthName} · Logged: ${fmtHours(loggedHours)} · Assigned: ${fmtHours(budgetHours)} · ${pctText} · ${remainText}`;
+  } else {
+    projectStatsBar.classList.add('hidden');
+    projectStatsText.textContent = `${monthName}: ${fmtHours(loggedHours)} logged`;
+  }
+}
+
 // --- Day View ---
 async function loadDay() {
   lastLoadAt = Date.now();
+  deleteSelectedBtn.classList.add('hidden');
+  deleteSelectedBtn.disabled = false;
+  deleteSelectedBtn.textContent = 'Delete selected';
   const loggedIn = await isRuddrLoggedIn();
   if (!loggedIn) {
     showSetupView();
@@ -376,23 +641,100 @@ async function loadDay() {
     // Client-side date filter as safety net
     const allEntries = response.results || [];
     entries = allEntries.filter((e) => e.date === dateStr);
-    renderDay();
+    await renderDay();
     initTimerBar();
   } catch (err) {
     dayContainer.innerHTML = `<div class="empty-state">Failed to load entries.<br><small>${err.message}</small></div>`;
   }
   loadWeekStatus(); // non-awaited: updates week bar independently
+  loadMonthStatus(); // non-awaited: updates month total in week bar
+  loadEntryProjectStats(); // non-awaited: updates per-project stats on entry cards
 }
 
-function updateDayLabel() {
-  if (isToday(currentDate)) {
-    currentDayLabel.textContent = 'Today';
-  } else {
-    currentDayLabel.textContent = formatDayLabel(currentDate);
+async function loadEntryProjectStats() {
+  try {
+    const [allocations, monthEntries] = await Promise.all([
+      getAllocations().catch(() => []),
+      getMonthEntries().catch(() => []),
+    ]);
+
+    const statEls = dayContainer.querySelectorAll('.entry-month-stat[data-project-id]');
+    const seen = {};
+
+    statEls.forEach((el) => {
+      const projectId = el.dataset.projectId;
+
+      if (seen[projectId]) {
+        el.innerHTML = seen[projectId];
+        return;
+      }
+
+      const loggedMinutes = monthEntries
+        .filter((e) => e.project?.id === projectId)
+        .filter((e) => (e.task?.name || '').trim().toLowerCase() !== 'account development')
+        .reduce((s, e) => s + (e.minutes || 0), 0);
+      const loggedH = minutesToHours(loggedMinutes);
+      const plannedH = getPlannedHoursForProject(allocations, projectId);
+
+      if (plannedH > 0) {
+        const pct = Math.min(100, Math.round((loggedH / plannedH) * 100));
+        const remaining = plannedH - loggedH;
+        const over = remaining < 0;
+        const remainText = over ? `${fmtHours(-remaining)} over` : `${fmtHours(remaining)} left`;
+        el.classList.toggle('over-stat', over);
+        el.innerHTML =
+          `<div class="entry-stat-bar"><div class="entry-stat-fill${over ? ' over' : ''}" style="width:${pct}%"></div></div>` +
+          `<span>${fmtHours(loggedH)} / ${fmtHours(plannedH)} · ${pct}% · ${remainText}</span>`;
+      } else {
+        el.innerHTML = `<span>${fmtHours(loggedH)} this month</span>`;
+      }
+
+      seen[projectId] = el.innerHTML;
+    });
+  } catch {
+    // fail silently
   }
 }
 
-function renderDay() {
+function updateDayLabel() {
+  const weekStart = getWeekStart(currentDate);
+  const weekEnd = addDays(weekStart, 6);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const monthYearLabel = document.getElementById('monthYearLabel');
+  if (weekStart.getMonth() === weekEnd.getMonth()) {
+    monthYearLabel.textContent = `${monthNames[weekStart.getMonth()]} ${weekStart.getFullYear()}`;
+  } else if (weekStart.getFullYear() === weekEnd.getFullYear()) {
+    monthYearLabel.textContent = `${monthNames[weekStart.getMonth()].slice(0, 3)} / ${monthNames[weekEnd.getMonth()].slice(0, 3)} ${weekStart.getFullYear()}`;
+  } else {
+    monthYearLabel.textContent = `${monthNames[weekStart.getMonth()].slice(0, 3)} ${weekStart.getFullYear()} / ${monthNames[weekEnd.getMonth()].slice(0, 3)} ${weekEnd.getFullYear()}`;
+  }
+  const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  dayPillsContainer.innerHTML = '';
+  for (let i = 0; i < 7; i++) {
+    const d = addDays(weekStart, i);
+    const btn = document.createElement('button');
+    btn.className = 'day-pill';
+    if (d.getTime() === today.getTime()) btn.classList.add('today');
+    if (d.getTime() === currentDate.getTime()) btn.classList.add('selected');
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'pill-name';
+    nameSpan.textContent = dayNames[i];
+    const dateSpan = document.createElement('span');
+    dateSpan.className = 'pill-date';
+    dateSpan.textContent = d.getDate();
+    btn.appendChild(nameSpan);
+    btn.appendChild(dateSpan);
+    btn.addEventListener('click', () => {
+      currentDate = d;
+      loadDay();
+    });
+    dayPillsContainer.appendChild(btn);
+  }
+}
+
+async function renderDay() {
   if (entries.length === 0) {
     const dayLabel = isToday(currentDate) ? 'today' : 'on ' + formatDayLabel(currentDate);
     dayContainer.innerHTML = `<div class="empty-state">No entries ${dayLabel}.<br>Click "+ New Entry" to add one.</div>`;
@@ -416,6 +758,7 @@ function renderDay() {
         projectName: e.project?.name || 'Unknown project',
         taskId,
         taskName: e.task?.name || '',
+        roleId: e.role?.id || '',
         totalMinutes: 0,
         entries: [],
       };
@@ -428,6 +771,8 @@ function renderDay() {
 
   const dayTotal = entries.reduce((sum, e) => sum + (e.minutes || 0), 0);
 
+  const favIds = await getFavouriteProjects();
+  const favProjectIds = new Set(favIds.map((k) => k.split('::')[0]));
   let html = '<div class="day-entries">';
 
   groups.forEach((g) => {
@@ -436,13 +781,18 @@ function renderDay() {
     const notes = g.entries.map((e) => e.notes).filter(Boolean);
     const uniqueNotes = [...new Set(notes)];
     const detail = [g.taskName, ...uniqueNotes].filter(Boolean).join(' \u00b7 ');
+    const isFav = favProjectIds.has(g.projectId);
 
-    html += `<div class="entry-item" data-id="${firstEntry.id}">
+    const entryIds = g.entries.map((e) => e.id).join(',');
+    html += `<div class="entry-item" data-id="${firstEntry.id}" data-entry-ids="${entryIds}" data-project-id="${g.projectId}">
+      <input type="checkbox" class="entry-checkbox" data-entry-ids="${entryIds}">
       <div class="entry-info">
         <div class="entry-project">${escapeHtml(g.projectName)}</div>
         ${detail ? `<div class="entry-detail">${escapeHtml(detail)}</div>` : ''}
+        <div class="entry-month-stat" data-project-id="${g.projectId}"></div>
       </div>
-      <span class="entry-hours">${minutesToHours(g.totalMinutes)}h</span>
+      <span class="entry-hours">${g.totalMinutes <= 1 ? '—' : `${minutesToHours(g.totalMinutes)}h`}</span>
+      <button class="entry-fav-btn${isFav ? ' is-favourite' : ''}" data-project-id="${g.projectId}" data-task-id="${g.taskId || ''}" data-role-id="${g.roleId || ''}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '★' : '☆'}</button>
       <button class="entry-play-btn" data-id="${firstEntry.id}" title="Start timer">&#9654;</button>
     </div>`;
   });
@@ -452,12 +802,30 @@ function renderDay() {
   dayContainer.innerHTML = html;
   dailyTotalEl.textContent = minutesToHours(dayTotal) + 'h';
 
+  const dayEntriesEl = dayContainer.querySelector('.day-entries');
+
+  function updateDeleteBtn() {
+    const anyChecked = dayContainer.querySelector('.entry-checkbox:checked');
+    deleteSelectedBtn.classList.toggle('hidden', !anyChecked);
+    dayEntriesEl.classList.toggle('has-selection', !!anyChecked);
+  }
+
   // Attach click handlers for entries
   dayContainer.querySelectorAll('.entry-item').forEach((el) => {
     el.addEventListener('click', (e) => {
-      if (e.target.closest('.entry-play-btn')) return;
+      if (e.target.closest('.entry-play-btn') || e.target.closest('.entry-fav-btn')) return;
+      if (e.target.closest('.entry-checkbox')) return;
       const entry = entries.find((en) => en.id === el.dataset.id);
       if (entry) openEntryForm(entry);
+    });
+  });
+
+  // Attach checkbox handlers
+  dayContainer.querySelectorAll('.entry-checkbox').forEach((cb) => {
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      cb.closest('.entry-item').classList.toggle('selected', cb.checked);
+      updateDeleteBtn();
     });
   });
 
@@ -467,6 +835,34 @@ function renderDay() {
       e.stopPropagation();
       const entry = entries.find((en) => en.id === el.dataset.id);
       if (entry) startTimerOnEntry(entry);
+    });
+  });
+
+  // Attach click handlers for star buttons
+  dayContainer.querySelectorAll('.entry-fav-btn').forEach((el) => {
+    el.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const projectId = el.dataset.projectId;
+      const favKey = `${projectId}::${el.dataset.taskId || ''}::${el.dataset.roleId || ''}`;
+      const currentFavIds = await getFavouriteProjects();
+      const isCurrentlyFav = currentFavIds.some((id) => id.split('::')[0] === projectId);
+      let newFavIds;
+      if (isCurrentlyFav) {
+        newFavIds = currentFavIds.filter((id) => id.split('::')[0] !== projectId);
+        dayContainer.querySelectorAll(`.entry-fav-btn[data-project-id="${projectId}"]`).forEach((btn) => {
+          btn.textContent = '☆';
+          btn.classList.remove('is-favourite');
+          btn.title = 'Add to favourites';
+        });
+      } else {
+        newFavIds = [...currentFavIds, favKey];
+        dayContainer.querySelectorAll(`.entry-fav-btn[data-project-id="${projectId}"]`).forEach((btn) => {
+          btn.textContent = '★';
+          btn.classList.add('is-favourite');
+          btn.title = 'Remove from favourites';
+        });
+      }
+      await setFavouriteProjects(newFavIds);
     });
   });
 }
@@ -513,27 +909,44 @@ async function openEntryForm(entry = null, defaultDate = null) {
     }
   }
 
-  // Populate project dropdown (already sorted alphabetically)
+  // Populate project dropdown with favourites section
+  const favProjectIds = new Set((await getFavouriteProjects()).map((k) => k.split('::')[0]));
   projectSelect.innerHTML = '<option value="">Select project...</option>';
-  projects.forEach((p) => {
+  const favProjects = projects.filter((p) => favProjectIds.has(p.id));
+  const otherProjects = projects.filter((p) => !favProjectIds.has(p.id));
+  if (favProjects.length > 0) {
+    const favGroup = document.createElement('optgroup');
+    favGroup.label = '★ Favourites';
+    favProjects.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name + (p.clientName ? ` (${p.clientName})` : '');
+      favGroup.appendChild(opt);
+    });
+    projectSelect.appendChild(favGroup);
+  }
+  const allGroup = document.createElement('optgroup');
+  allGroup.label = favProjects.length > 0 ? 'All Projects' : 'Projects';
+  otherProjects.forEach((p) => {
     const opt = document.createElement('option');
     opt.value = p.id;
-    const clientLabel = p.clientName ? ` (${p.clientName})` : '';
-    opt.textContent = p.name + clientLabel;
-    projectSelect.appendChild(opt);
+    opt.textContent = p.name + (p.clientName ? ` (${p.clientName})` : '');
+    allGroup.appendChild(opt);
   });
+  projectSelect.appendChild(allGroup);
 
-  // Reset task/role dropdowns
+  // Reset task/role dropdowns and project stats
   taskSelect.innerHTML = '<option value="">Select task...</option>';
   taskSelect.disabled = true;
   roleSelect.innerHTML = '<option value="">Select role...</option>';
   roleSelect.disabled = true;
+  projectStats.classList.add('hidden');
 
   if (entry) {
     // Fill form with existing entry
     projectSelect.value = entry.project?.id || '';
     entryDate.value = entry.date;
-    entryHours.value = minutesToHours(entry.minutes);
+    entryHours.value = entry.minutes <= 1 ? '' : minutesToHours(entry.minutes);
     entryNotes.value = entry.notes || '';
     // Load tasks & roles for the project
     if (entry.project?.id) {
@@ -601,6 +1014,8 @@ async function loadProjectDetails(projectId) {
     roleSelect.appendChild(opt);
   });
   roleSelect.disabled = roles.length === 0;
+
+  loadProjectStats(projectId); // non-awaited: updates project hours bar
 }
 
 // --- Start Timer on Existing Entry (from weekly view) ---
@@ -745,12 +1160,14 @@ async function stopTimer() {
 // --- Event Listeners ---
 
 openLoginBtn.addEventListener('click', () => {
-  const email = setupEmail.value.trim();
-  if (!email) {
-    setStatus(setupStatus, 'Please enter your email first.', 'error');
-    return;
+  if (!reloginMode) {
+    const email = setupEmail.value.trim();
+    if (!email) {
+      setStatus(setupStatus, 'Please enter your email first.', 'error');
+      return;
+    }
+    chrome.storage.local.set({ pendingEmail: email });
   }
-  chrome.storage.local.set({ pendingEmail: email });
   setStatus(setupStatus, 'Opening Ruddr login...', 'success');
   stopLoginPolling();
   startLoginPolling();
@@ -762,22 +1179,38 @@ settingsBtn.addEventListener('click', () => {
 });
 
 prevDayBtn.addEventListener('click', () => {
-  currentDate = addDays(currentDate, -1);
+  const prevMonth = currentDate.getMonth();
+  currentDate = addDays(currentDate, -7);
+  if (currentDate.getMonth() !== prevMonth) { projectHoursCache = {}; monthEntriesCache = null; }
   loadDay();
 });
 
 nextDayBtn.addEventListener('click', () => {
-  currentDate = addDays(currentDate, 1);
-  loadDay();
-});
-
-currentDayLabel.addEventListener('click', () => {
-  currentDate = new Date();
-  currentDate.setHours(0, 0, 0, 0);
+  const prevMonth = currentDate.getMonth();
+  currentDate = addDays(currentDate, 7);
+  if (currentDate.getMonth() !== prevMonth) { projectHoursCache = {}; monthEntriesCache = null; }
   loadDay();
 });
 
 addEntryBtn.addEventListener('click', () => openEntryForm());
+
+deleteSelectedBtn.addEventListener('click', async () => {
+  const checked = [...dayContainer.querySelectorAll('.entry-checkbox:checked')];
+  if (checked.length === 0) return;
+  const ids = checked.flatMap((cb) => cb.dataset.entryIds.split(','));
+  const label = `${ids.length} ${ids.length === 1 ? 'entry' : 'entries'}`;
+  if (!confirm(`Delete ${label}?`)) return;
+  deleteSelectedBtn.disabled = true;
+  deleteSelectedBtn.textContent = 'Deleting…';
+  try {
+    await Promise.all(ids.map((id) => deleteTimeEntry(id)));
+    await loadDay();
+  } catch (err) {
+    showToast('Delete failed: ' + err.message);
+    deleteSelectedBtn.disabled = false;
+    deleteSelectedBtn.textContent = 'Delete selected';
+  }
+});
 
 timerStopBtn.addEventListener('click', stopTimer);
 
@@ -827,6 +1260,7 @@ projectSelect.addEventListener('change', async () => {
     taskSelect.disabled = true;
     roleSelect.innerHTML = '<option value="">Select role...</option>';
     roleSelect.disabled = true;
+    projectStats.classList.add('hidden');
   }
 });
 
@@ -931,6 +1365,207 @@ deleteConfirmBtn.addEventListener('click', async () => {
     deleteConfirmBtn.textContent = 'Delete';
   }
 });
+
+
+// --- Copy Over ---
+copyLastWeekBtn.addEventListener('click', () => {
+  copyModal.classList.remove('hidden');
+});
+
+monthOverviewBtn.addEventListener('click', () => showMonthlyOverview());
+
+monthlyPanelClose.addEventListener('click', () => {
+  monthlyPanel.classList.add('hidden');
+});
+
+copyCancelBtn.addEventListener('click', () => {
+  copyModal.classList.add('hidden');
+});
+
+copyConfirmBtn.addEventListener('click', async () => {
+  const mode = document.querySelector('input[name="copyMode"]:checked').value;
+  copyConfirmBtn.disabled = true;
+  copyConfirmBtn.textContent = 'Copying…';
+  try {
+    if (mode === 'favourites') {
+      await copyFavourites();
+    } else {
+      await copyFromLastWeek(mode);
+    }
+    copyModal.classList.add('hidden');
+    await loadDay();
+  } catch (err) {
+    showToast('Copy failed: ' + err.message);
+  } finally {
+    copyConfirmBtn.disabled = false;
+    copyConfirmBtn.textContent = 'Copy';
+  }
+});
+
+async function copyFromLastWeek(mode) {
+  const memberId = await getMemberId();
+
+  const lastWeekStart = addDays(getWeekStart(currentDate), -7);
+  const lastWeekEnd = addDays(lastWeekStart, 6);
+  const lastWeekResponse = await listTimeEntries({
+    memberId,
+    dateOnOrAfter: formatDate(lastWeekStart),
+    dateOnOrBefore: formatDate(lastWeekEnd),
+  });
+  const lastWeekEntries = (lastWeekResponse.results || []).filter(
+    (e) => e.date >= formatDate(lastWeekStart) && e.date <= formatDate(lastWeekEnd)
+  );
+
+  if (lastWeekEntries.length === 0) {
+    showToast('No entries found in last week');
+    return;
+  }
+
+  // Fetch current week to avoid duplicates
+  const thisWeekStart = getWeekStart(currentDate);
+  const thisWeekEnd = addDays(thisWeekStart, 6);
+  const thisWeekResponse = await listTimeEntries({
+    memberId,
+    dateOnOrAfter: formatDate(thisWeekStart),
+    dateOnOrBefore: formatDate(thisWeekEnd),
+  });
+  const existingKeys = new Set(
+    (thisWeekResponse.results || []).map((e) => `${e.date}::${e.project?.id || ''}::${e.task?.id || ''}`)
+  );
+
+  const today = formatDate(currentDate);
+  let entriesToCreate;
+
+  if (mode === 'whole-week') {
+    // Copy each entry to the same weekday this week
+    entriesToCreate = lastWeekEntries
+      .map((e) => ({
+        date: formatDate(addDays(new Date(e.date + 'T00:00:00'), 7)),
+        projectId: e.project?.id,
+        taskId: e.task?.id || null,
+        roleId: e.role?.id || null,
+        notes: e.notes || '',
+      }))
+      .filter((e) => e.projectId && !existingKeys.has(`${e.date}::${e.projectId}::${e.taskId || ''}`));
+  } else if (mode === 'today-only') {
+    // Copy last week's same weekday entries to today
+    const lastWeekSameDay = formatDate(addDays(currentDate, -7));
+    const sameDayEntries = lastWeekEntries.filter((e) => e.date === lastWeekSameDay);
+    if (sameDayEntries.length === 0) {
+      showToast('No entries found for last week\'s same day');
+      return;
+    }
+    entriesToCreate = sameDayEntries
+      .map((e) => ({
+        date: today,
+        projectId: e.project?.id,
+        taskId: e.task?.id || null,
+        roleId: e.role?.id || null,
+        notes: e.notes || '',
+      }))
+      .filter((e) => e.projectId && !existingKeys.has(`${today}::${e.projectId}::${e.taskId || ''}`));
+  } else {
+    // all-to-today — unique project+task combos from all last week to today
+    const seen = new Set();
+    entriesToCreate = [];
+    for (const e of lastWeekEntries) {
+      const projectId = e.project?.id;
+      if (!projectId) continue;
+      const taskId = e.task?.id || null;
+      const comboKey = `${projectId}::${taskId || ''}`;
+      if (seen.has(comboKey)) continue;
+      seen.add(comboKey);
+      if (existingKeys.has(`${today}::${projectId}::${taskId || ''}`)) continue;
+      entriesToCreate.push({
+        date: today,
+        projectId,
+        taskId,
+        roleId: e.role?.id || null,
+        notes: e.notes || '',
+      });
+    }
+  }
+
+  if (entriesToCreate.length === 0) {
+    showToast('All entries already exist for this period', 'success');
+    return;
+  }
+
+  let created = 0;
+  let skipped = 0;
+  for (const entry of entriesToCreate) {
+    const data = {
+      typeId: 'project_time',
+      projectId: entry.projectId,
+      date: entry.date,
+      minutes: 1,
+      notes: entry.notes,
+      memberId,
+    };
+    if (entry.taskId) data.taskId = entry.taskId;
+    if (entry.roleId) data.roleId = entry.roleId;
+    try {
+      await createTimeEntry(data);
+      created++;
+    } catch {
+      skipped++;
+    }
+  }
+
+  const skippedMsg = skipped > 0 ? ` (${skipped} skipped — archived task)` : '';
+  showToast(`${created} ${created === 1 ? 'entry' : 'entries'} copied${skippedMsg}`, 'success');
+  trackEvent('copy_over', { mode, count: created });
+}
+
+async function copyFavourites() {
+  const favKeys = await getFavouriteProjects();
+  if (!favKeys || favKeys.length === 0) {
+    showToast('No favourite projects saved');
+    return;
+  }
+  const memberId = await getMemberId();
+  const today = formatDate(currentDate);
+  const todayResponse = await listTimeEntries({ memberId, dateOnOrAfter: today, dateOnOrBefore: today });
+  const existingKeys = new Set(
+    (todayResponse.results || [])
+      .filter((e) => e.date === today)
+      .map((e) => `${e.project?.id}::${e.task?.id || ''}`)
+  );
+  const toCreate = favKeys.filter((key) => {
+    const [projectId, taskId] = key.split('::');
+    return !existingKeys.has(`${projectId}::${taskId}`);
+  });
+  if (toCreate.length === 0) {
+    showToast('All favourites already have entries today', 'success');
+    return;
+  }
+  let created = 0;
+  let skipped = 0;
+  for (const key of toCreate) {
+    const [projectId, taskId, roleId] = key.split('::');
+    const data = { typeId: 'project_time', projectId, date: today, minutes: 1, notes: '', memberId };
+    if (taskId) data.taskId = taskId;
+    if (roleId) data.roleId = roleId;
+    try {
+      await createTimeEntry(data);
+      created++;
+    } catch (err) {
+      if (err.message && err.message.toLowerCase().includes('notes')) {
+        try {
+          await createTimeEntry({ ...data, notes: 'Add notes' });
+          created++;
+        } catch {
+          skipped++;
+        }
+      } else {
+        skipped++;
+      }
+    }
+  }
+  const skippedMsg = skipped > 0 ? ` (${skipped} skipped)` : '';
+  showToast(`${created} ${created === 1 ? 'entry' : 'entries'} added${skippedMsg}`, 'success');
+  trackEvent('copy_favourites', { count: created });
+}
 
 // --- Reload on focus: reset to today, pick up changes from other clients (debounced 30s) ---
 window.addEventListener('focus', () => {
