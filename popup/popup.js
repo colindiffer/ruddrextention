@@ -1,4 +1,4 @@
-import { getMemberId, setMemberId, getMemberEmail, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState, getFavouriteProjects, setFavouriteProjects } from '../lib/storage.js';
+import { getMemberId, setMemberId, getMemberEmail, getLastUsedProjectId, setLastUsedProjectId, getLastUsedTaskId, setLastUsedTaskId, addRecentProject, getTimerState, setTimerState, clearTimerState, getFavouriteProjects, setFavouriteProjects, getDraftEntries, saveDraftEntries, addDraftEntry, removeDraftEntry } from '../lib/storage.js';
 import { listTimeEntries, createTimeEntry, updateTimeEntry, deleteTimeEntry, listProjectMembers, listProjectTasks, listMembers, getProject, listAllocationsForMember } from '../lib/api.js';
 import { trackEvent, trackView } from '../lib/analytics.js';
 
@@ -641,6 +641,18 @@ async function loadDay() {
     // Client-side date filter as safety net
     const allEntries = response.results || [];
     entries = allEntries.filter((e) => e.date === dateStr);
+
+    // Merge local drafts for today (skip if real entry already exists for same project+task)
+    const allDrafts = await getDraftEntries();
+    // Auto-clean drafts older than 14 days
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const freshDrafts = allDrafts.filter((d) => d.createdAt > cutoff);
+    if (freshDrafts.length !== allDrafts.length) await saveDraftEntries(freshDrafts);
+    const draftsForDay = freshDrafts
+      .filter((d) => d.date === dateStr)
+      .filter((d) => !entries.some((e) => e.project?.id === d.project?.id && (e.task?.id || '') === (d.task?.id || '')));
+    entries = [...entries, ...draftsForDay];
+
     await renderDay();
     initTimerBar();
   } catch (err) {
@@ -769,7 +781,7 @@ async function renderDay() {
     groupMap[key].entries.push(e);
   });
 
-  const dayTotal = entries.reduce((sum, e) => sum + (e.minutes || 0), 0);
+  const dayTotal = entries.filter((e) => !e._isDraft).reduce((sum, e) => sum + (e.minutes || 0), 0);
 
   const favIds = await getFavouriteProjects();
   const favProjectIds = new Set(favIds.map((k) => k.split('::')[0]));
@@ -783,17 +795,21 @@ async function renderDay() {
     const detail = [g.taskName, ...uniqueNotes].filter(Boolean).join(' \u00b7 ');
     const isFav = favProjectIds.has(g.projectId);
 
+    const isDraft = !!firstEntry._isDraft;
     const entryIds = g.entries.map((e) => e.id).join(',');
-    html += `<div class="entry-item" data-id="${firstEntry.id}" data-entry-ids="${entryIds}" data-project-id="${g.projectId}">
-      <input type="checkbox" class="entry-checkbox" data-entry-ids="${entryIds}">
+    const draftAttr = isDraft ? ` data-client-id="${firstEntry._clientId}"` : '';
+    const draftClass = isDraft ? ' entry-item--draft' : '';
+    const draftDetail = isDraft ? `${detail ? escapeHtml(detail) + ' · ' : ''}<span class="entry-draft-badge">unfilled</span>` : (detail ? escapeHtml(detail) : '');
+    html += `<div class="entry-item${draftClass}" data-id="${firstEntry.id || ''}"${draftAttr} data-project-id="${g.projectId}">
+      ${isDraft ? '' : `<input type="checkbox" class="entry-checkbox" data-entry-ids="${entryIds}">`}
       <div class="entry-info">
         <div class="entry-project">${escapeHtml(g.projectName)}</div>
-        ${detail ? `<div class="entry-detail">${escapeHtml(detail)}</div>` : ''}
-        <div class="entry-month-stat" data-project-id="${g.projectId}"></div>
+        ${draftDetail ? `<div class="entry-detail">${draftDetail}</div>` : ''}
+        ${isDraft ? '' : `<div class="entry-month-stat" data-project-id="${g.projectId}"></div>`}
       </div>
-      <span class="entry-hours">${g.totalMinutes <= 1 ? '—' : `${minutesToHours(g.totalMinutes)}h`}</span>
-      <button class="entry-fav-btn${isFav ? ' is-favourite' : ''}" data-project-id="${g.projectId}" data-task-id="${g.taskId || ''}" data-role-id="${g.roleId || ''}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '★' : '☆'}</button>
-      <button class="entry-play-btn" data-id="${firstEntry.id}" title="Start timer">&#9654;</button>
+      <span class="entry-hours">${isDraft ? '—' : (g.totalMinutes <= 1 ? '—' : `${minutesToHours(g.totalMinutes)}h`)}</span>
+      ${isDraft ? '' : `<button class="entry-fav-btn${isFav ? ' is-favourite' : ''}" data-project-id="${g.projectId}" data-task-id="${g.taskId || ''}" data-role-id="${g.roleId || ''}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '★' : '☆'}</button>`}
+      ${isDraft ? '' : `<button class="entry-play-btn" data-id="${firstEntry.id}" title="Start timer">&#9654;</button>`}
     </div>`;
   });
 
@@ -815,7 +831,9 @@ async function renderDay() {
     el.addEventListener('click', (e) => {
       if (e.target.closest('.entry-play-btn') || e.target.closest('.entry-fav-btn')) return;
       if (e.target.closest('.entry-checkbox')) return;
-      const entry = entries.find((en) => en.id === el.dataset.id);
+      const entry = el.dataset.clientId
+        ? entries.find((en) => en._clientId === el.dataset.clientId)
+        : entries.find((en) => en.id === el.dataset.id);
       if (entry) openEntryForm(entry);
     });
   });
@@ -946,7 +964,7 @@ async function openEntryForm(entry = null, defaultDate = null) {
     // Fill form with existing entry
     projectSelect.value = entry.project?.id || '';
     entryDate.value = entry.date;
-    entryHours.value = entry.minutes <= 1 ? '' : minutesToHours(entry.minutes);
+    entryHours.value = (entry._isDraft || entry.minutes <= 1) ? '' : minutesToHours(entry.minutes);
     entryNotes.value = entry.notes || '';
     // Load tasks & roles for the project
     if (entry.project?.id) {
@@ -1314,8 +1332,8 @@ entryForm.addEventListener('submit', async (e) => {
   if (taskId) data.taskId = taskId;
   if (roleId) data.roleId = roleId;
 
-  // Add memberId for new entries
-  if (!editingEntry) {
+  // Drafts and new entries both need memberId
+  if (!editingEntry || editingEntry._isDraft) {
     data.memberId = await getMemberId();
   }
 
@@ -1323,14 +1341,18 @@ entryForm.addEventListener('submit', async (e) => {
   saveEntryBtn.textContent = 'Saving...';
 
   try {
-    if (editingEntry) {
+    if (editingEntry && !editingEntry._isDraft) {
       await updateTimeEntry(editingEntry.id, data);
       showToast('Entry updated', 'success');
       trackEvent('entry_save', { action: 'update' });
     } else {
       await createTimeEntry(data);
+      // If saving a draft, remove it from local storage
+      if (editingEntry?._isDraft) {
+        await removeDraftEntry(editingEntry._clientId);
+      }
       showToast('Entry created', 'success');
-      trackEvent('entry_save', { action: 'create' });
+      trackEvent('entry_save', { action: editingEntry?._isDraft ? 'draft_confirm' : 'create' });
     }
 
     // Remember last used project/task
@@ -1365,7 +1387,11 @@ deleteConfirmBtn.addEventListener('click', async () => {
   deleteConfirmBtn.textContent = 'Deleting...';
 
   try {
-    await deleteTimeEntry(editingEntry.id);
+    if (editingEntry._isDraft) {
+      await removeDraftEntry(editingEntry._clientId);
+    } else {
+      await deleteTimeEntry(editingEntry.id);
+    }
     showToast('Entry deleted', 'success');
     deleteModal.classList.add('hidden');
     showView(weeklyView);
@@ -1444,6 +1470,9 @@ async function copyFromLastWeek(mode) {
   const existingKeys = new Set(
     (thisWeekResponse.results || []).map((e) => `${e.date}::${e.project?.id || ''}::${e.task?.id || ''}`)
   );
+  // Also dedup against existing drafts
+  const existingDrafts = await getDraftEntries();
+  existingDrafts.forEach((d) => existingKeys.add(`${d.date}::${d.project?.id || ''}::${d.task?.id || ''}`));
 
   const today = formatDate(currentDate);
   let entriesToCreate;
@@ -1503,30 +1532,26 @@ async function copyFromLastWeek(mode) {
     return;
   }
 
-  let created = 0;
-  let skipped = 0;
+  // Save as local drafts — no API call until user fills in hours
+  const now = Date.now();
   for (const entry of entriesToCreate) {
-    const data = {
-      typeId: 'project_time',
-      projectId: entry.projectId,
+    const sourceEntry = lastWeekEntries.find((e) => e.project?.id === entry.projectId && (e.task?.id || null) === entry.taskId);
+    await addDraftEntry({
+      _isDraft: true,
+      _clientId: `draft-${now}-${Math.random().toString(36).slice(2)}`,
       date: entry.date,
-      minutes: 1,
+      project: { id: entry.projectId, name: sourceEntry?.project?.name || '' },
+      task: entry.taskId ? { id: entry.taskId, name: sourceEntry?.task?.name || '' } : null,
+      role: entry.roleId ? { id: entry.roleId } : null,
       notes: entry.notes,
-      memberId,
-    };
-    if (entry.taskId) data.taskId = entry.taskId;
-    if (entry.roleId) data.roleId = entry.roleId;
-    try {
-      await createTimeEntry(data);
-      created++;
-    } catch {
-      skipped++;
-    }
+      minutes: 0,
+      createdAt: now,
+    });
   }
 
-  const skippedMsg = skipped > 0 ? ` (${skipped} skipped — archived task)` : '';
-  showToast(`${created} ${created === 1 ? 'entry' : 'entries'} copied${skippedMsg}`, 'success');
-  trackEvent('copy_over', { mode, count: created });
+  const n = entriesToCreate.length;
+  showToast(`${n} ${n === 1 ? 'entry' : 'entries'} copied`, 'success');
+  trackEvent('copy_over', { mode, count: n });
 }
 
 async function copyFavourites() {
@@ -1543,6 +1568,10 @@ async function copyFavourites() {
       .filter((e) => e.date === today)
       .map((e) => `${e.project?.id}::${e.task?.id || ''}`)
   );
+  // Also dedup against existing drafts
+  const existingDrafts = await getDraftEntries();
+  existingDrafts.filter((d) => d.date === today).forEach((d) => existingKeys.add(`${d.project?.id}::${d.task?.id || ''}`));
+
   const toCreate = favKeys.filter((key) => {
     const [projectId, taskId] = key.split('::');
     return !existingKeys.has(`${projectId}::${taskId}`);
@@ -1551,32 +1580,28 @@ async function copyFavourites() {
     showToast('All favourites already have entries today', 'success');
     return;
   }
-  let created = 0;
-  let skipped = 0;
+
+  // Save as local drafts — no API call until user fills in hours
+  const now = Date.now();
   for (const key of toCreate) {
     const [projectId, taskId, roleId] = key.split('::');
-    const data = { typeId: 'project_time', projectId, date: today, minutes: 1, notes: '', memberId };
-    if (taskId) data.taskId = taskId;
-    if (roleId) data.roleId = roleId;
-    try {
-      await createTimeEntry(data);
-      created++;
-    } catch (err) {
-      if (err.message && err.message.toLowerCase().includes('notes')) {
-        try {
-          await createTimeEntry({ ...data, notes: 'Add notes' });
-          created++;
-        } catch {
-          skipped++;
-        }
-      } else {
-        skipped++;
-      }
-    }
+    const project = projects.find((p) => p.id === projectId);
+    await addDraftEntry({
+      _isDraft: true,
+      _clientId: `draft-${now}-${Math.random().toString(36).slice(2)}`,
+      date: today,
+      project: { id: projectId, name: project?.name || '' },
+      task: taskId ? { id: taskId, name: '' } : null,
+      role: roleId ? { id: roleId } : null,
+      notes: '',
+      minutes: 0,
+      createdAt: now,
+    });
   }
-  const skippedMsg = skipped > 0 ? ` (${skipped} skipped)` : '';
-  showToast(`${created} ${created === 1 ? 'entry' : 'entries'} added${skippedMsg}`, 'success');
-  trackEvent('copy_favourites', { count: created });
+
+  const n = toCreate.length;
+  showToast(`${n} ${n === 1 ? 'entry' : 'entries'} added`, 'success');
+  trackEvent('copy_favourites', { count: n });
 }
 
 // --- Reload on focus: reset to today, pick up changes from other clients (debounced 30s) ---
