@@ -1219,22 +1219,22 @@ submitWeekBtn.addEventListener('click', async () => {
   submitWeekBtn.disabled = true;
   try {
     if (action === 'submit') {
-      const zeroHourEntries = weekEntries.filter((e) => (e.minutes || 0) === 0);
-      if (zeroHourEntries.length > 0) {
-        await Promise.all(zeroHourEntries.map((e) => deleteTimeEntry(e.id)));
+      const placeholderEntries = weekEntries.filter((e) => (e.minutes || 0) <= 1);
+      if (placeholderEntries.length > 0) {
+        await Promise.all(placeholderEntries.map((e) => deleteTimeEntry(e.id)));
       }
       const submittable = weekEntries.filter((e) => {
-        if ((e.minutes || 0) === 0) return false;
+        if ((e.minutes || 0) <= 1) return false;
         const s = e.statusId || 'not_submitted';
         return s === 'not_submitted' || s === 'rejected';
       });
       if (submittable.length === 0) {
-        const n = zeroHourEntries.length;
+        const n = placeholderEntries.length;
         showToast(n > 0 ? `${n} empty ${n === 1 ? 'entry' : 'entries'} removed` : 'Nothing to submit');
         return;
       }
       await Promise.all(submittable.map((e) => updateTimeEntry(e.id, { statusId: 'pending_approval', notes: e.notes || '' })));
-      const n = zeroHourEntries.length;
+      const n = placeholderEntries.length;
       const removedMsg = n > 0 ? ` (${n} empty ${n === 1 ? 'entry' : 'entries'} removed)` : '';
       showToast(`Timesheet submitted${removedMsg}`, 'success');
       trackEvent('week_submit');
@@ -1510,7 +1510,7 @@ async function copyFromLastWeek(mode) {
       typeId: 'project_time',
       projectId: entry.projectId,
       date: entry.date,
-      minutes: 0,
+      minutes: 1,
       notes: entry.notes,
       memberId,
     };
@@ -1555,7 +1555,7 @@ async function copyFavourites() {
   let skipped = 0;
   for (const key of toCreate) {
     const [projectId, taskId, roleId] = key.split('::');
-    const data = { typeId: 'project_time', projectId, date: today, minutes: 0, notes: '', memberId };
+    const data = { typeId: 'project_time', projectId, date: today, minutes: 1, notes: '', memberId };
     if (taskId) data.taskId = taskId;
     if (roleId) data.roleId = roleId;
     try {
