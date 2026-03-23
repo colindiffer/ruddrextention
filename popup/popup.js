@@ -1110,7 +1110,9 @@ async function startTimer() {
   const project = projects.find((p) => p.id === projectId);
   const today = formatDate(new Date());
 
-  const targetEntry = editingEntry || entries.find((e) =>
+  const realEditingEntry = editingEntry && !editingEntry._isDraft ? editingEntry : null;
+  const targetEntry = realEditingEntry || entries.find((e) =>
+    !e._isDraft &&
     e.date === today &&
     e.project?.id === projectId &&
     (e.task?.id || null) === taskId
@@ -1128,6 +1130,10 @@ async function startTimer() {
       const created = await createTimeEntry(data);
       entryId = created.id;
       accumulatedMinutes = 0;
+    }
+    // If starting timer from a draft, remove the draft now that a real entry exists
+    if (editingEntry?._isDraft) {
+      await removeDraftEntry(editingEntry._clientId);
     }
 
     const state = { entryId, projectId, projectName: project?.name || '', notes, startedAt: Date.now(), accumulatedMinutes };
